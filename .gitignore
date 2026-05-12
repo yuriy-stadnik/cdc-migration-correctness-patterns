@@ -1,0 +1,35 @@
+# Terraform runtime state and local working data
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.tfstate.lock.info
+crash.log
+crash.*.log
+*.tfvars
+*.tfvars.json
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Java/Gradle build output
+lambda_java/.gradle/
+lambda_java/build/
+lambda_java/bin/
+
+# Local/editor/OS files
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Generated/debug artifacts from this workspace
+hist
+snapshot.txt
+graph.png
+graph.svg
+tmp/
+EXECUTION_PIPELINE_COMMANDS.md
+OTHER_COMMANDS_FROM_HISTORY.md
+PROJECT_TARGET_DESCRIPTION_AND_GAP_ANALYSIS.md
