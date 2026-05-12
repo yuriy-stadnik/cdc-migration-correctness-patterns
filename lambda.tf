@@ -38,13 +38,13 @@ resource "aws_iam_role_policy" "lambda_secrets" {
     Version = "2012-10-17",
     Statement = [
       {
-        Effect = "Allow",
-        Action = ["secretsmanager:GetSecretValue"],
+        Effect   = "Allow",
+        Action   = ["secretsmanager:GetSecretValue"],
         Resource = try(aws_rds_cluster.aurora.master_user_secret[0].secret_arn, "*")
       },
       {
-        Effect = "Allow",
-        Action = ["kms:Decrypt"],
+        Effect   = "Allow",
+        Action   = ["kms:Decrypt"],
         Resource = "*"
       }
     ]
@@ -92,25 +92,36 @@ resource "aws_lambda_function" "consumer" {
 
   environment {
     variables = {
-      DB_HOST          = aws_rds_cluster.aurora.endpoint
-      DB_PORT          = "5432"
-      DB_NAME          = var.db_name
-      DB_USER          = var.db_username
-      DB_SECRET_ARN    = try(aws_rds_cluster.aurora.master_user_secret[0].secret_arn, "")
-      TABLE_NAME       = "events"
+      DB_HOST       = aws_rds_cluster.aurora.endpoint
+      DB_PORT       = "5432"
+      DB_NAME       = var.db_name
+      DB_USER       = var.db_username
+      DB_SECRET_ARN = try(aws_rds_cluster.aurora.master_user_secret[0].secret_arn, "")
     }
   }
 
   depends_on = [aws_rds_cluster_instance.aurora_instance]
 }
 
-# MSK -> Lambda trigger (Lambda polls MSK topic partitions)
-resource "aws_lambda_event_source_mapping" "msk_customers" {
+locals {
+  lambda_msk_topics = toset([
+    "operational.products",
+    "operational.orders",
+    "operational.order_items",
+    "operational.addresses",
+    "operational.contact_numbers"
+  ])
+}
+
+# MSK -> Lambda triggers. Lambda supports one Kafka topic per event source mapping.
+resource "aws_lambda_event_source_mapping" "msk_operational" {
+  for_each = local.lambda_msk_topics
+
   event_source_arn = aws_msk_serverless_cluster.this.arn
   function_name    = aws_lambda_function.consumer.arn
 
-  topics            = ["pg1.inventory.customers"]
-  starting_position = "LATEST"
+  topics            = [each.value]
+  starting_position = "TRIM_HORIZON"
 
   # conservative defaults for a DB-writer Lambda
   batch_size                         = 50

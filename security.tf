@@ -75,6 +75,14 @@ resource "aws_security_group" "msk" {
     security_groups = [aws_security_group.lambda.id]
   }
 
+  ingress {
+    description = "MSK IAM from Lambda event source mapping ENIs"
+    from_port   = 9098
+    to_port     = 9098
+    protocol    = "tcp"
+    self        = true
+  }
+
   egress {
     from_port   = 0
     to_port     = 0

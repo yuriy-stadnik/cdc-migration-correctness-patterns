@@ -5,8 +5,8 @@ data "aws_availability_zones" "available" {
 locals {
   azs = slice(data.aws_availability_zones.available.names, 0, 2)
 
-  vpc_cidr            = "10.50.0.0/16"
-  public_subnet_cidrs = ["10.50.0.0/24", "10.50.1.0/24"]
+  vpc_cidr             = "10.50.0.0/16"
+  public_subnet_cidrs  = ["10.50.0.0/24", "10.50.1.0/24"]
   private_subnet_cidrs = ["10.50.10.0/24", "10.50.11.0/24"]
 }
 
@@ -29,7 +29,7 @@ resource "aws_subnet" "public" {
   cidr_block              = local.public_subnet_cidrs[count.index]
   availability_zone       = local.azs[count.index]
   map_public_ip_on_launch = true
-  tags = { Name = "${var.project}-public-${count.index}" }
+  tags                    = { Name = "${var.project}-public-${count.index}" }
 }
 
 resource "aws_subnet" "private" {
@@ -37,7 +37,7 @@ resource "aws_subnet" "private" {
   vpc_id            = aws_vpc.this.id
   cidr_block        = local.private_subnet_cidrs[count.index]
   availability_zone = local.azs[count.index]
-  tags = { Name = "${var.project}-private-${count.index}" }
+  tags              = { Name = "${var.project}-private-${count.index}" }
 }
 
 resource "aws_route_table" "public" {
