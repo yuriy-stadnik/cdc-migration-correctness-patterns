@@ -198,7 +198,7 @@ services:
     environment:
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: flink-jobmanager
-        taskmanager.numberOfTaskSlots: 4
+        taskmanager.numberOfTaskSlots: 12
         parallelism.default: 1
         state.backend.type: hashmap
         execution.checkpointing.interval: 10s
@@ -221,7 +221,7 @@ services:
     environment:
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: flink-jobmanager
-        taskmanager.numberOfTaskSlots: 4
+        taskmanager.numberOfTaskSlots: 12
         parallelism.default: 1
         state.backend.type: hashmap
         execution.checkpointing.interval: 10s

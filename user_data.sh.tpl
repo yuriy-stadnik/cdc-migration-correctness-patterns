@@ -241,14 +241,78 @@ CREATE TABLE IF NOT EXISTS inventory.customers (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS inventory.accounts (
+  account_id BIGINT PRIMARY KEY,
+  customer_id BIGINT,
+  account_type TEXT,
+  balance DECIMAL(15,2),
+  street TEXT,
+  city TEXT,
+  state TEXT,
+  zip_code TEXT,
+  home_phone TEXT,
+  work_phone TEXT,
+  mobile_phone TEXT,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS inventory.orders_flat (
+  order_id BIGINT PRIMARY KEY,
+  customer_id BIGINT,
+  order_date TIMESTAMPTZ DEFAULT now(),
+  product_name TEXT,
+  product_category TEXT,
+  unit_price DECIMAL(10,2),
+  quantity INTEGER,
+  total_price DECIMAL(10,2)
+);
+
 ALTER TABLE inventory.customers REPLICA IDENTITY FULL;
+ALTER TABLE inventory.accounts REPLICA IDENTITY FULL;
+ALTER TABLE inventory.orders_flat REPLICA IDENTITY FULL;
+
 ALTER TABLE inventory.customers OWNER TO dbz;
+ALTER TABLE inventory.accounts OWNER TO dbz;
+ALTER TABLE inventory.orders_flat OWNER TO dbz;
 
 INSERT INTO inventory.customers (id, first_name, last_name, email, status)
 VALUES
   (1, 'Alice', 'Smith', 'alice@example.com', 'ACTIVE'),
   (2, 'Bob', 'Brown', 'bob@example.com', 'ACTIVE')
 ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO inventory.accounts (
+  account_id, customer_id, account_type, balance, street, city, state,
+  zip_code, home_phone, work_phone, mobile_phone
+)
+VALUES
+  (101, 1, 'SAVINGS', 5500.00, '123 Maple St', 'Ridgewood', 'NJ', '07450', '201-555-0123', NULL, '201-555-4567'),
+  (102, 2, 'CHECKING', 1200.50, '456 Oak Ave', 'Paramus', 'NJ', '07652', '201-555-9999', NULL, NULL)
+ON CONFLICT (account_id) DO UPDATE
+SET account_type = EXCLUDED.account_type,
+    balance = EXCLUDED.balance,
+    street = EXCLUDED.street,
+    city = EXCLUDED.city,
+    state = EXCLUDED.state,
+    zip_code = EXCLUDED.zip_code,
+    home_phone = EXCLUDED.home_phone,
+    work_phone = EXCLUDED.work_phone,
+    mobile_phone = EXCLUDED.mobile_phone;
+
+INSERT INTO inventory.orders_flat (
+  order_id, customer_id, product_name, product_category, unit_price,
+  quantity, total_price
+)
+VALUES
+  (5001, 1, 'Wireless Headphones', 'Electronics', 150.00, 1, 150.00),
+  (5002, 1, 'USB-C Cable', 'Electronics', 25.00, 2, 50.00),
+  (5003, 2, 'Wireless Headphones', 'Electronics', 150.00, 1, 150.00)
+ON CONFLICT (order_id) DO UPDATE
+SET product_name = EXCLUDED.product_name,
+    product_category = EXCLUDED.product_category,
+    unit_price = EXCLUDED.unit_price,
+    quantity = EXCLUDED.quantity,
+    total_price = EXCLUDED.total_price;
 EOF
 
 cat > /opt/lab/target/init/01-schema.sql <<'EOF'
@@ -265,6 +329,46 @@ CREATE TABLE IF NOT EXISTS customer_projection (
   ingested_at TEXT NOT NULL DEFAULT NOW()::TEXT,
   schema_version TEXT NOT NULL DEFAULT 'v1'
 );
+
+CREATE SCHEMA IF NOT EXISTS operational;
+
+CREATE TABLE IF NOT EXISTS operational.addresses (
+  customer_id BIGINT NOT NULL,
+  address_type TEXT NOT NULL,
+  street TEXT,
+  city TEXT,
+  state TEXT,
+  zip_code TEXT,
+  PRIMARY KEY (customer_id, address_type)
+);
+
+CREATE TABLE IF NOT EXISTS operational.contact_numbers (
+  customer_id BIGINT NOT NULL,
+  phone_type TEXT NOT NULL,
+  phone_number TEXT NOT NULL,
+  PRIMARY KEY (customer_id, phone_type)
+);
+
+CREATE TABLE IF NOT EXISTS operational.products (
+  name TEXT PRIMARY KEY,
+  category TEXT,
+  current_price DECIMAL(10,2)
+);
+
+CREATE TABLE IF NOT EXISTS operational.orders (
+  id BIGINT PRIMARY KEY,
+  customer_id BIGINT,
+  order_date TIMESTAMPTZ,
+  status TEXT
+);
+
+CREATE TABLE IF NOT EXISTS operational.order_items (
+  order_id BIGINT NOT NULL,
+  product_name TEXT NOT NULL,
+  quantity INTEGER,
+  price_at_purchase DECIMAL(10,2),
+  PRIMARY KEY (order_id, product_name)
+);
 EOF
 
 cat > /opt/lab/connectors/legacy-postgres-source-config.json <<'EOF'
@@ -279,7 +383,7 @@ cat > /opt/lab/connectors/legacy-postgres-source-config.json <<'EOF'
   "topic.prefix": "pg1",
   "plugin.name": "pgoutput",
   "schema.include.list": "inventory",
-  "table.include.list": "inventory.customers",
+  "table.include.list": "inventory.customers,inventory.accounts,inventory.orders_flat",
   "slot.name": "dbz_slot",
   "publication.autocreate.mode": "filtered",
   "snapshot.mode": "initial",
@@ -309,7 +413,46 @@ CREATE TABLE customers_cdc (
   'connector' = 'kafka',
   'topic' = 'pg1.inventory.customers',
   'properties.bootstrap.servers' = 'kafka:29092',
-  'properties.group.id' = 'flink-sql-customers-projection',
+  'scan.startup.mode' = 'earliest-offset',
+  'format' = 'debezium-json'
+);
+
+CREATE TABLE accounts_cdc (
+  account_id BIGINT,
+  customer_id BIGINT,
+  account_type STRING,
+  balance DECIMAL(15,2),
+  street STRING,
+  city STRING,
+  state STRING,
+  zip_code STRING,
+  home_phone STRING,
+  work_phone STRING,
+  mobile_phone STRING,
+  created_at STRING,
+  PRIMARY KEY (account_id) NOT ENFORCED
+) WITH (
+  'connector' = 'kafka',
+  'topic' = 'pg1.inventory.accounts',
+  'properties.bootstrap.servers' = 'kafka:29092',
+  'scan.startup.mode' = 'earliest-offset',
+  'format' = 'debezium-json'
+);
+
+CREATE TABLE orders_flat_cdc (
+  order_id BIGINT,
+  customer_id BIGINT,
+  order_date STRING,
+  product_name STRING,
+  product_category STRING,
+  unit_price DECIMAL(10,2),
+  quantity INT,
+  total_price DECIMAL(10,2),
+  PRIMARY KEY (order_id) NOT ENFORCED
+) WITH (
+  'connector' = 'kafka',
+  'topic' = 'pg1.inventory.orders_flat',
+  'properties.bootstrap.servers' = 'kafka:29092',
   'scan.startup.mode' = 'earliest-offset',
   'format' = 'debezium-json'
 );
@@ -335,6 +478,76 @@ CREATE TABLE customer_projection (
   'password' = 'apppass'
 );
 
+CREATE TABLE operational_addresses (
+  customer_id BIGINT,
+  address_type STRING,
+  street STRING,
+  city STRING,
+  state STRING,
+  zip_code STRING,
+  PRIMARY KEY (customer_id, address_type) NOT ENFORCED
+) WITH (
+  'connector' = 'jdbc',
+  'url' = 'jdbc:postgresql://target-postgres:5432/microservices',
+  'table-name' = 'operational.addresses',
+  'username' = 'appuser',
+  'password' = 'apppass'
+);
+
+CREATE TABLE operational_contact_numbers (
+  customer_id BIGINT,
+  phone_type STRING,
+  phone_number STRING,
+  PRIMARY KEY (customer_id, phone_type) NOT ENFORCED
+) WITH (
+  'connector' = 'jdbc',
+  'url' = 'jdbc:postgresql://target-postgres:5432/microservices',
+  'table-name' = 'operational.contact_numbers',
+  'username' = 'appuser',
+  'password' = 'apppass'
+);
+
+CREATE TABLE operational_products (
+  name STRING,
+  category STRING,
+  current_price DECIMAL(10,2),
+  PRIMARY KEY (name) NOT ENFORCED
+) WITH (
+  'connector' = 'jdbc',
+  'url' = 'jdbc:postgresql://target-postgres:5432/microservices',
+  'table-name' = 'operational.products',
+  'username' = 'appuser',
+  'password' = 'apppass'
+);
+
+CREATE TABLE operational_orders (
+  id BIGINT,
+  customer_id BIGINT,
+  order_date TIMESTAMP(3),
+  status STRING,
+  PRIMARY KEY (id) NOT ENFORCED
+) WITH (
+  'connector' = 'jdbc',
+  'url' = 'jdbc:postgresql://target-postgres:5432/microservices',
+  'table-name' = 'operational.orders',
+  'username' = 'appuser',
+  'password' = 'apppass'
+);
+
+CREATE TABLE operational_order_items (
+  order_id BIGINT,
+  product_name STRING,
+  quantity INT,
+  price_at_purchase DECIMAL(10,2),
+  PRIMARY KEY (order_id, product_name) NOT ENFORCED
+) WITH (
+  'connector' = 'jdbc',
+  'url' = 'jdbc:postgresql://target-postgres:5432/microservices',
+  'table-name' = 'operational.order_items',
+  'username' = 'appuser',
+  'password' = 'apppass'
+);
+
 INSERT INTO customer_projection
 SELECT
   id,
@@ -349,6 +562,57 @@ SELECT
   CAST(CURRENT_TIMESTAMP AS STRING) AS ingested_at,
   'v1' AS schema_version
 FROM customers_cdc;
+
+INSERT INTO operational_addresses
+SELECT
+  customer_id,
+  'HOME' AS address_type,
+  street,
+  city,
+  state,
+  zip_code
+FROM accounts_cdc
+WHERE street IS NOT NULL;
+
+INSERT INTO operational_contact_numbers
+SELECT customer_id, 'HOME' AS phone_type, home_phone AS phone_number
+FROM accounts_cdc
+WHERE home_phone IS NOT NULL;
+
+INSERT INTO operational_contact_numbers
+SELECT customer_id, 'WORK' AS phone_type, work_phone AS phone_number
+FROM accounts_cdc
+WHERE work_phone IS NOT NULL;
+
+INSERT INTO operational_contact_numbers
+SELECT customer_id, 'MOBILE' AS phone_type, mobile_phone AS phone_number
+FROM accounts_cdc
+WHERE mobile_phone IS NOT NULL;
+
+INSERT INTO operational_products
+SELECT
+  product_name AS name,
+  product_category AS category,
+  unit_price AS current_price
+FROM orders_flat_cdc
+WHERE product_name IS NOT NULL;
+
+INSERT INTO operational_orders
+SELECT
+  order_id AS id,
+  customer_id,
+  CAST(REPLACE(SUBSTRING(order_date, 1, 19), 'T', ' ') AS TIMESTAMP(3)) AS order_date,
+  'COMPLETED' AS status
+FROM orders_flat_cdc;
+
+INSERT INTO operational_order_items
+SELECT
+  order_id,
+  product_name,
+  quantity,
+  unit_price AS price_at_purchase
+FROM orders_flat_cdc
+WHERE product_name IS NOT NULL;
 EOF
 
 # -------------------------------------------------------------------
@@ -612,7 +876,7 @@ services:
     environment:
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: flink-jobmanager
-        taskmanager.numberOfTaskSlots: 4
+        taskmanager.numberOfTaskSlots: 12
         parallelism.default: 1
         state.backend.type: hashmap
         execution.checkpointing.interval: 10s
@@ -635,7 +899,7 @@ services:
     environment:
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: flink-jobmanager
-        taskmanager.numberOfTaskSlots: 4
+        taskmanager.numberOfTaskSlots: 12
         parallelism.default: 1
         state.backend.type: hashmap
         execution.checkpointing.interval: 10s

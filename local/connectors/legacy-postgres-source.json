@@ -11,7 +11,7 @@
     "topic.prefix": "pg1",
     "plugin.name": "pgoutput",
     "schema.include.list": "inventory",
-    "table.include.list": "inventory.customers",
+    "table.include.list": "inventory.customers,inventory.accounts,inventory.orders_flat",
     "slot.name": "dbz_slot",
     "publication.autocreate.mode": "filtered",
     "snapshot.mode": "initial",
