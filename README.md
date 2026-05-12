@@ -237,6 +237,7 @@ On the EC2 host, useful paths are:
 /opt/lab/postgres/init
 /opt/lab/connectors
 /opt/lab/flink/sql/init.sql
+/opt/lab/integration-test-cdc-to-kafka.sh
 /usr/local/bin/lab-up.sh
 /var/log/user-data.log
 ```
@@ -247,6 +248,33 @@ Useful EC2 emulator ports are restricted by `ssh_cidr`:
 - `8080`: Kafka UI
 - `8081`: Flink UI
 - `8083`: Debezium Connect REST API
+
+## EC2 CDC to Kafka Test
+
+The EC2 bootstrap creates `/opt/lab/integration-test-cdc-to-kafka.sh`. The test inserts one row into `inventory.customers` in the source PostgreSQL container and verifies that Debezium publishes the change to Kafka topic `pg1.inventory.customers`.
+
+After connecting to the EC2 host:
+
+```bash
+sudo /opt/lab/integration-test-cdc-to-kafka.sh
+```
+
+Optional parameters can be set as environment variables:
+
+```bash
+sudo env CUSTOMER_ID=10001 \
+  EMAIL=cdc-test-10001@example.com \
+  TIMEOUT_SECONDS=180 \
+  /opt/lab/integration-test-cdc-to-kafka.sh
+```
+
+For an EC2 instance created before this script was added, copy and run the repository version:
+
+```bash
+scp -i ~/.ssh/temp_ec2_key scripts/ec2-cdc-to-kafka-test.sh ec2-user@$(terraform output -raw ec2_public_ip):/tmp/
+ssh -i ~/.ssh/temp_ec2_key ec2-user@$(terraform output -raw ec2_public_ip) \
+  'sudo install -m 0755 /tmp/ec2-cdc-to-kafka-test.sh /opt/lab/integration-test-cdc-to-kafka.sh && sudo /opt/lab/integration-test-cdc-to-kafka.sh'
+```
 
 ## Lambda Behavior
 
