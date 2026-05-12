@@ -1,7 +1,10 @@
 @echo off
 setlocal
 
-set "MY_IP=%~1"
+set "INPUT_IP=%~1"
+if "%INPUT_IP%"=="" set "INPUT_IP=%MY_IP%"
+if "%INPUT_IP%"=="" set "INPUT_IP=%PUBLIC_IP%"
+if "%INPUT_IP%"=="" set "INPUT_IP=%TF_VAR_ssh_cidr%"
 
 set "AWS_REGION=%~2"
 if "%AWS_REGION%"=="" set "AWS_REGION=us-east-1"
@@ -10,26 +13,27 @@ set "KEY_PATH=%~3"
 if "%KEY_PATH%"=="" set "KEY_PATH=%USERPROFILE%\.ssh\temp_ec2_key"
 
 for /f "usebackq tokens=*" %%i in (`curl -fsS https://checkip.amazonaws.com 2^>nul`) do set "CURRENT_IP=%%i"
-if "%MY_IP%"=="" (
+if "%INPUT_IP%"=="" (
   if not defined CURRENT_IP (
     echo Usage: %~nx0 ^<your-public-ip^> [aws-region] [ssh-key-path]
     exit /b 1
   )
-  set "MY_IP=%CURRENT_IP%"
+  set "INPUT_IP=%CURRENT_IP%"
 )
 
 if defined CURRENT_IP (
-  if not "%MY_IP%"=="%CURRENT_IP%" (
-    if not "%MY_IP%"=="%CURRENT_IP%/32" (
-      echo Warning: current outbound IPv4 appears to be %CURRENT_IP%, but SSH CIDR was set from %MY_IP%.
+  if not "%INPUT_IP%"=="%CURRENT_IP%" (
+    if not "%INPUT_IP%"=="%CURRENT_IP%/32" (
+      echo Warning: current outbound IPv4 appears to be %CURRENT_IP%, but SSH CIDR was set from %INPUT_IP%.
       echo If SSH times out, rerun with: %~nx0 %CURRENT_IP% %AWS_REGION% "%KEY_PATH%"
     )
   )
 )
 
-set "SSH_CIDR=%MY_IP%"
-echo %MY_IP% | findstr /C:"/" >nul
-if errorlevel 1 set "SSH_CIDR=%MY_IP%/32"
+set "SSH_CIDR=%INPUT_IP%"
+echo %INPUT_IP% | findstr /C:"/" >nul
+if errorlevel 1 set "SSH_CIDR=%INPUT_IP%/32"
+set "TF_VAR_ssh_cidr=%SSH_CIDR%"
 
 if not exist "%USERPROFILE%\.ssh" mkdir "%USERPROFILE%\.ssh"
 
@@ -38,7 +42,7 @@ if not exist "%KEY_PATH%" (
   if errorlevel 1 exit /b 1
 )
 
-terraform apply -var="ssh_cidr=%SSH_CIDR%" -target=aws_internet_gateway.igw -target=aws_route.public_default -target=aws_route_table_association.public_assoc -target=aws_security_group.ec2 -target=aws_instance.kafka_mm2 -target=aws_iam_user_policy.ec2_instance_connect
+terraform apply -target=aws_internet_gateway.igw -target=aws_route.public_default -target=aws_route_table_association.public_assoc -target=aws_security_group.ec2 -target=aws_instance.kafka_mm2 -target=aws_iam_user_policy.ec2_instance_connect
 if errorlevel 1 exit /b 1
 
 for /f "usebackq tokens=*" %%i in (`terraform output -raw ec2_instance_id`) do set "INSTANCE_ID=%%i"

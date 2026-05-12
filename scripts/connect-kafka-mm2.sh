@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MY_IP="${1:-}"
+MY_IP="${1:-${MY_IP:-${PUBLIC_IP:-${TF_VAR_ssh_cidr:-}}}}"
 AWS_REGION="${2:-us-east-1}"
 KEY_PATH="${3:-$HOME/.ssh/temp_ec2_key}"
 
@@ -24,6 +24,7 @@ if [[ "$MY_IP" == */* ]]; then
 else
   SSH_CIDR="$MY_IP/32"
 fi
+export TF_VAR_ssh_cidr="$SSH_CIDR"
 
 mkdir -p "$(dirname "$KEY_PATH")"
 
@@ -34,7 +35,6 @@ fi
 chmod 600 "$KEY_PATH"
 
 terraform apply \
-  -var="ssh_cidr=$SSH_CIDR" \
   -target=aws_internet_gateway.igw \
   -target=aws_route.public_default \
   -target=aws_route_table_association.public_assoc \

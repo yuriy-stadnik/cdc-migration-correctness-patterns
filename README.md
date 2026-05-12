@@ -93,13 +93,14 @@ The main variables are defined in `variables.tf`:
 - `db_name`: Aurora database name, default `appdb`
 - `db_username`: Aurora master username, default `appuser`
 
-Set `ssh_cidr` to your current public IP in CIDR form before applying, for example:
+Set `ssh_cidr` to your current public IP in CIDR form before applying. Terraform also reads this automatically from the `TF_VAR_ssh_cidr` OS environment variable.
 
 ```bash
-terraform apply -var='ssh_cidr=<your-public-ip>/32'
+export TF_VAR_ssh_cidr=<your-public-ip>/32
+terraform apply
 ```
 
-The helper scripts below also set this variable from an IP parameter.
+The helper scripts below set `TF_VAR_ssh_cidr` before Terraform runs. They accept the IP as an argument, or read it from `MY_IP`, `PUBLIC_IP`, or `TF_VAR_ssh_cidr`.
 
 ## Build Lambda
 
@@ -153,7 +154,14 @@ Run on macOS/Linux. If no IP is provided, the script uses `https://checkip.amazo
 ./scripts/connect-kafka-mm2.sh
 ```
 
-You can also pass the IP explicitly:
+You can also set an OS environment variable before running the script:
+
+```bash
+export MY_IP=<your-public-ip>
+./scripts/connect-kafka-mm2.sh
+```
+
+Or pass the IP explicitly:
 
 ```bash
 ./scripts/connect-kafka-mm2.sh <your-public-ip> us-east-1 ~/.ssh/temp_ec2_key
@@ -165,20 +173,28 @@ Run on Windows. If no IP is provided, the script also attempts to detect it:
 scripts\connect-kafka-mm2.bat
 ```
 
+On Windows, you can set the OS environment variable before running Terraform:
+
+```bat
+set MY_IP=<your-public-ip>
+scripts\apply-ec2-access.bat
+```
+
 The scripts:
 
 1. Detect or accept your public IP and convert it to CIDR form, for example `<your-public-ip>/32`.
 2. Create a temporary SSH key if it does not already exist.
-3. Apply the targeted EC2 resources and EC2 Instance Connect IAM policy with `-var="ssh_cidr=<your-ip>/32"`.
-4. Read `ec2_instance_id` and `ec2_public_ip` from Terraform outputs.
-5. Send the public key with `aws ec2-instance-connect send-ssh-public-key`.
-6. Open SSH as `ec2-user`.
+3. Set `TF_VAR_ssh_cidr=<your-ip>/32` before Terraform runs.
+4. Apply the targeted EC2 resources and EC2 Instance Connect IAM policy.
+5. Read `ec2_instance_id` and `ec2_public_ip` from Terraform outputs.
+6. Send the public key with `aws ec2-instance-connect send-ssh-public-key`.
+7. Open SSH as `ec2-user`.
 
 Equivalent manual commands:
 
 ```bash
+export TF_VAR_ssh_cidr=<your-public-ip>/32
 terraform apply \
-  -var='ssh_cidr=<your-public-ip>/32' \
   -target=aws_security_group.ec2 \
   -target=aws_instance.kafka_mm2 \
   -target=aws_iam_user_policy.ec2_instance_connect
