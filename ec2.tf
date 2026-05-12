@@ -110,9 +110,15 @@ resource "aws_instance" "kafka_mm2" {
   vpc_security_group_ids      = [aws_security_group.ec2.id]
   iam_instance_profile        = aws_iam_instance_profile.ec2.name
   user_data_base64 = base64gzip(templatefile("${path.module}/user_data.sh.tpl", {
-    msk_bootstrap_iam = data.aws_msk_bootstrap_brokers.this.bootstrap_brokers_sasl_iam
+    msk_bootstrap_iam = var.ec2_msk_bootstrap_iam
     region            = var.aws_region
   }))
+
+  root_block_device {
+    volume_size           = var.ec2_root_volume_size
+    volume_type           = "gp3"
+    delete_on_termination = true
+  }
 
   tags = { Name = "${var.project}-ec2-kafka-mm2" }
 }

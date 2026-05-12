@@ -13,6 +13,18 @@ variable "ec2_instance_type" {
   default = "t3.large"
 }
 
+variable "ec2_root_volume_size" {
+  description = "Root EBS volume size in GiB for the Kafka/MM2 EC2 host."
+  type        = number
+  default     = 80
+}
+
+variable "ec2_msk_bootstrap_iam" {
+  description = "Optional MSK IAM bootstrap string for MirrorMaker2 on the EC2 host. Leave empty for EC2-only PostgreSQL, CDC, Kafka, and Flink testing."
+  type        = string
+  default     = ""
+}
+
 variable "ssh_cidr" {
   description = "Your public IP /32 for SSH"
   type        = string

@@ -13,6 +13,19 @@ STATUS="${STATUS:-ACTIVE}"
 
 cd "$LAB_DIR"
 
+if ! command -v docker >/dev/null 2>&1; then
+  echo "Docker is not installed on this EC2 instance." >&2
+  echo "The EC2 bootstrap did not complete, or this instance was created before the Docker stack was added." >&2
+  echo "Check /var/log/user-data.log, or recreate aws_instance.kafka_mm2 so user_data runs again." >&2
+  exit 1
+fi
+
+if [[ ! -f "$LAB_DIR/docker-compose.yml" ]]; then
+  echo "Docker Compose file not found: $LAB_DIR/docker-compose.yml" >&2
+  echo "The EC2 bootstrap did not create the local CDC stack. Check /var/log/user-data.log." >&2
+  exit 1
+fi
+
 wait_for_command() {
   local description="$1"
   local timeout="$2"

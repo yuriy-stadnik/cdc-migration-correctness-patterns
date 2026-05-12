@@ -4,12 +4,38 @@ set -euo pipefail
 # Log everything to a file + console (helps debugging)
 exec > >(tee /var/log/user-data.log | logger -t user-data -s 2>/dev/console) 2>&1
 
-yum update -y
-amazon-linux-extras install docker -y
+retry() {
+  local attempts="$1"
+  shift
+  local delay=10
+  local n=1
+
+  until "$@"; do
+    if [ "$n" -ge "$attempts" ]; then
+      echo "Command failed after $attempts attempts: $*" >&2
+      return 1
+    fi
+    echo "Command failed, retrying in $delay seconds [$n/$attempts]: $*" >&2
+    sleep "$delay"
+    n=$((n + 1))
+  done
+}
+
+# Amazon Linux 2 repo URLs may resolve through dualstack endpoints. For this
+# IPv4-only VPC, force yum to IPv4 and give transient repository timeouts room
+# to recover.
+grep -q '^ip_resolve=4$' /etc/yum.conf || echo 'ip_resolve=4' >> /etc/yum.conf
+grep -q '^timeout=30$' /etc/yum.conf || echo 'timeout=30' >> /etc/yum.conf
+grep -q '^retries=10$' /etc/yum.conf || echo 'retries=10' >> /etc/yum.conf
+
+retry 6 yum clean metadata
+retry 6 yum makecache -y
+retry 6 yum update -y
+retry 6 amazon-linux-extras install docker -y
 systemctl enable --now docker
 
 # Optional tools
-yum install -y nmap-ncat || true
+retry 6 yum install -y nmap-ncat || true
 
 # Allow ec2-user to run docker without sudo (next login)
 usermod -aG docker ec2-user || true
@@ -23,7 +49,7 @@ COMPOSE_PLUGIN_BIN="$${COMPOSE_PLUGIN_DIR}/docker-compose"
 
 mkdir -p "$${COMPOSE_PLUGIN_DIR}"
 
-curl -fL "https://github.com/docker/compose/releases/download/$${COMPOSE_VERSION}/docker-compose-linux-x86_64" \
+retry 6 curl -4 -fL "https://github.com/docker/compose/releases/download/$${COMPOSE_VERSION}/docker-compose-linux-x86_64" \
   -o "$${COMPOSE_PLUGIN_BIN}"
 chmod +x "$${COMPOSE_PLUGIN_BIN}"
 
@@ -82,6 +108,19 @@ EMAIL="$${EMAIL:-cdc-test-$${CUSTOMER_ID}@example.com}"
 STATUS="$${STATUS:-ACTIVE}"
 
 cd "$LAB_DIR"
+
+if ! command -v docker >/dev/null 2>&1; then
+  echo "Docker is not installed on this EC2 instance." >&2
+  echo "The EC2 bootstrap did not complete, or this instance was created before the Docker stack was added." >&2
+  echo "Check /var/log/user-data.log, or recreate aws_instance.kafka_mm2 so user_data runs again." >&2
+  exit 1
+fi
+
+if [[ ! -f "$LAB_DIR/docker-compose.yml" ]]; then
+  echo "Docker Compose file not found: $LAB_DIR/docker-compose.yml" >&2
+  echo "The EC2 bootstrap did not create the local CDC stack. Check /var/log/user-data.log." >&2
+  exit 1
+fi
 
 wait_for_command() {
   local description="$1"
@@ -315,6 +354,7 @@ EOF
 # -------------------------------------------------------------------
 # /opt/lab/mm2.properties (Serverless MSK IAM + MM2 lab-safe)
 # -------------------------------------------------------------------
+if [ -n "${msk_bootstrap_iam}" ]; then
 cat > mm2.properties <<EOF
 clusters = source, target
 
@@ -368,6 +408,7 @@ request.timeout.ms = 60000
 
 replication.policy.class = org.apache.kafka.connect.mirror.IdentityReplicationPolicy
 EOF
+fi
 
 # -------------------------------------------------------------------
 # /opt/lab/docker-compose.yml
@@ -642,6 +683,10 @@ services:
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: "kafka:29092"
       KAFKA_CLUSTERS_0_ZOOKEEPER: "zookeeper:2181"
 
+EOF
+
+if [ -n "${msk_bootstrap_iam}" ]; then
+cat >> docker-compose.yml <<'EOF'
   mirrormaker2:
     image: confluentinc/cp-kafka-connect:7.8.0
     restart: unless-stopped
@@ -662,6 +707,9 @@ services:
     command: >
       bash -lc "connect-mirror-maker /etc/kafka/mm2.properties"
 EOF
+else
+  echo "MSK bootstrap not provided; MirrorMaker2 service is disabled for EC2-only testing."
+fi
 
 # -------------------------------------------------------------------
 # systemd helper: restart the lab after boot any time

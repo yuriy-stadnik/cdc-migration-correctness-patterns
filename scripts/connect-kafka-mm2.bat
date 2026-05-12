@@ -42,7 +42,7 @@ if not exist "%KEY_PATH%" (
   if errorlevel 1 exit /b 1
 )
 
-terraform apply -target=aws_internet_gateway.igw -target=aws_route.public_default -target=aws_route_table_association.public_assoc -target=aws_security_group.ec2 -target=aws_instance.kafka_mm2 -target=aws_iam_user_policy.ec2_instance_connect
+terraform apply -auto-approve -target=aws_internet_gateway.igw -target=aws_route.public_default -target=aws_route_table_association.public_assoc -target=aws_security_group.ec2 -target=aws_instance.kafka_mm2 -target=aws_iam_user_policy.ec2_instance_connect
 if errorlevel 1 exit /b 1
 
 for /f "usebackq tokens=*" %%i in (`terraform output -raw ec2_instance_id`) do set "INSTANCE_ID=%%i"
@@ -72,4 +72,4 @@ for /l %%a in (1,1,6) do (
 )
 
 :ssh_connect
-ssh -i "%KEY_PATH%" ec2-user@%INSTANCE_PUBLIC_IP%
+ssh -o StrictHostKeyChecking=accept-new -i "%KEY_PATH%" ec2-user@%INSTANCE_PUBLIC_IP%

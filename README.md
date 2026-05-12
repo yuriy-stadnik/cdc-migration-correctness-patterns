@@ -271,9 +271,31 @@ sudo env CUSTOMER_ID=10001 \
 For an EC2 instance created before this script was added, copy and run the repository version:
 
 ```bash
-scp -i ~/.ssh/temp_ec2_key scripts/ec2-cdc-to-kafka-test.sh ec2-user@$(terraform output -raw ec2_public_ip):/tmp/
+./scripts/install-ec2-cdc-test.sh
+
 ssh -i ~/.ssh/temp_ec2_key ec2-user@$(terraform output -raw ec2_public_ip) \
-  'sudo install -m 0755 /tmp/ec2-cdc-to-kafka-test.sh /opt/lab/integration-test-cdc-to-kafka.sh && sudo /opt/lab/integration-test-cdc-to-kafka.sh'
+  'sudo /opt/lab/integration-test-cdc-to-kafka.sh'
+```
+
+If the test script is already installed, refresh the temporary EC2 Instance Connect key and run it:
+
+```bash
+./scripts/run-ec2-cdc-test.sh
+```
+
+EC2 Instance Connect SSH keys are temporary. If you run `scp` manually, first send the key again and copy the file immediately after:
+
+```bash
+aws ec2-instance-connect send-ssh-public-key \
+  --region us-east-1 \
+  --instance-id "$(terraform output -raw ec2_instance_id)" \
+  --instance-os-user ec2-user \
+  --ssh-public-key file://~/.ssh/temp_ec2_key.pub
+
+scp -o StrictHostKeyChecking=accept-new \
+  -i ~/.ssh/temp_ec2_key \
+  scripts/ec2-cdc-to-kafka-test.sh \
+  ec2-user@$(terraform output -raw ec2_public_ip):/tmp/
 ```
 
 ## Lambda Behavior

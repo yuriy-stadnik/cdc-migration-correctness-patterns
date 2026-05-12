@@ -23,4 +23,4 @@ if errorlevel 1 set "SSH_CIDR=%INPUT_IP%/32"
 set "TF_VAR_ssh_cidr=%SSH_CIDR%"
 echo TF_VAR_ssh_cidr=%TF_VAR_ssh_cidr%
 
-terraform apply -target=aws_internet_gateway.igw -target=aws_route.public_default -target=aws_route_table_association.public_assoc -target=aws_security_group.ec2 -target=aws_instance.kafka_mm2 -target=aws_iam_user_policy.ec2_instance_connect
+terraform apply -auto-approve -target=aws_internet_gateway.igw -target=aws_route.public_default -target=aws_route_table_association.public_assoc -target=aws_security_group.ec2 -target=aws_instance.kafka_mm2 -target=aws_iam_user_policy.ec2_instance_connect

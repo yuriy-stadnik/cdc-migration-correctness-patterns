@@ -23,6 +23,7 @@ export TF_VAR_ssh_cidr="$SSH_CIDR"
 echo "TF_VAR_ssh_cidr=$TF_VAR_ssh_cidr"
 
 terraform apply \
+  -auto-approve \
   -target=aws_internet_gateway.igw \
   -target=aws_route.public_default \
   -target=aws_route_table_association.public_assoc \

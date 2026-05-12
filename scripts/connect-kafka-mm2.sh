@@ -35,6 +35,7 @@ fi
 chmod 600 "$KEY_PATH"
 
 terraform apply \
+  -auto-approve \
   -target=aws_internet_gateway.igw \
   -target=aws_route.public_default \
   -target=aws_route_table_association.public_assoc \
@@ -69,4 +70,7 @@ for attempt in {1..6}; do
   sleep 10
 done
 
-ssh -i "$KEY_PATH" "ec2-user@$INSTANCE_PUBLIC_IP"
+ssh \
+  -o StrictHostKeyChecking=accept-new \
+  -i "$KEY_PATH" \
+  "ec2-user@$INSTANCE_PUBLIC_IP"
