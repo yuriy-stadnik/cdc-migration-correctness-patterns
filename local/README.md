@@ -1,6 +1,6 @@
 # Local Integration Stack
 
-This directory integrates the local `/Users/yuriy/work/PipeLine` CDC/Flink stack into the current AWS migration project.
+This directory contains the local CDC/Flink stack used by the current migration project.
 
 It validates the first part of the target architecture before using AWS:
 
@@ -12,7 +12,7 @@ local legacy PostgreSQL
   -> local target PostgreSQL
 ```
 
-## Included From PipeLine
+## Included Components
 
 - PostgreSQL source with logical decoding settings.
 - One-shot PostgreSQL initializer.
@@ -181,3 +181,86 @@ Not implemented yet:
 - Automated test assertions.
 - MirrorMaker2 to AWS MSK from the local stack.
 - Source LSN and transaction ID extraction into target projection.
+
+## Two-Compose Local Migration Deployment
+
+The split local deployment replaces the AWS side with local containers while keeping the same migration shape:
+
+```text
+source compose:
+  source PostgreSQL -> Debezium CDC -> source Kafka -> Flink -> operational.* topics -> MirrorMaker2
+
+cloud replacement compose:
+  cloud Kafka -> local Lambda replacement -> cloud PostgreSQL
+```
+
+Files:
+
+- `local/source/docker-compose.yml`: source/on-prem emulator with PostgreSQL, Debezium, Kafka, Flink, and MirrorMaker2.
+- `local/cloud/docker-compose.yml`: cloud replacement with Kafka, a Lambda-like consumer, and PostgreSQL.
+- `local/source/mm2.properties`: MirrorMaker2 replication from `source-kafka:29092` to `cloud-kafka:39092`.
+- `local/cloud/lambda-consumer/src/main/java/com/example/local/LocalLambdaConsumer.java`: consumes `operational.*` topics and upserts into cloud PostgreSQL.
+
+Start with Terraform:
+
+```bash
+terraform apply \
+  -var enable_local_deployment=true \
+  -target=terraform_data.local_docker_network \
+  -target=terraform_data.local_cloud_deployment \
+  -target=terraform_data.local_source_deployment
+```
+
+Or start directly with Docker Compose:
+
+```bash
+docker network inspect cdc-migration-local >/dev/null 2>&1 || docker network create cdc-migration-local
+docker compose -f local/cloud/docker-compose.yml up -d --build
+docker compose -f local/source/docker-compose.yml up -d
+```
+
+Run the local delivery test:
+
+```bash
+./scripts/run-local-e2e.sh
+```
+
+Reset both local compose stacks and run from a blank slate:
+
+```bash
+RESET=1 ./scripts/run-local-e2e.sh
+```
+
+Verify cloud replacement Kafka topics:
+
+```bash
+docker exec -it local-cloud-kafka kafka-topics \
+  --bootstrap-server cloud-kafka:39092 \
+  --list
+```
+
+Verify cloud replacement PostgreSQL:
+
+```bash
+docker exec -it local-cloud-postgres psql -U appuser -d appdb \
+  -c "SELECT 'products' AS table_name, count(*) FROM operational.products
+      UNION ALL SELECT 'orders', count(*) FROM operational.orders
+      UNION ALL SELECT 'order_items', count(*) FROM operational.order_items
+      UNION ALL SELECT 'addresses', count(*) FROM operational.addresses
+      UNION ALL SELECT 'contact_numbers', count(*) FROM operational.contact_numbers
+      ORDER BY table_name;"
+```
+
+Stop the split local deployment:
+
+```bash
+docker compose -f local/source/docker-compose.yml down
+docker compose -f local/cloud/docker-compose.yml down
+```
+
+Delete split local volumes:
+
+```bash
+docker compose -f local/source/docker-compose.yml down -v
+docker compose -f local/cloud/docker-compose.yml down -v
+```

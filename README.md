@@ -79,7 +79,43 @@ Start it from the repository root:
 docker compose -f local/docker-compose.yml up -d
 ```
 
-The stack integrates the local `/Users/yuriy/work/PipeLine` project pieces: one-shot PostgreSQL init, one-shot Debezium connector registration, Flink connector JAR mounting, Kafka UI, and a basic Flink SQL projection into target PostgreSQL. See `local/README.md` for topic checks, source-change commands, and cleanup steps.
+The stack packages the local CDC components directly in this repository: one-shot PostgreSQL init, one-shot Debezium connector registration, Flink connector JAR mounting, Kafka UI, and a basic Flink SQL projection into target PostgreSQL. See `local/README.md` for topic checks, source-change commands, and cleanup steps.
+
+## Local Two-Compose Migration Emulation
+
+For local development without MSK, Lambda, or Aurora, Terraform can start a split Docker deployment:
+
+```text
+source compose:
+  PostgreSQL -> Debezium CDC -> Kafka -> Flink -> operational.* Kafka topics -> MirrorMaker2
+
+cloud replacement compose:
+  Kafka -> local Lambda replacement -> PostgreSQL
+```
+
+Run it with Terraform:
+
+```bash
+terraform apply \
+  -var enable_local_deployment=true \
+  -target=terraform_data.local_docker_network \
+  -target=terraform_data.local_cloud_deployment \
+  -target=terraform_data.local_source_deployment
+```
+
+Run a delivery test:
+
+```bash
+./scripts/run-local-e2e.sh
+```
+
+Reset both local compose stacks and rerun from a clean slate:
+
+```bash
+RESET=1 ./scripts/run-local-e2e.sh
+```
+
+The source compose lives in `local/source/docker-compose.yml`; the cloud replacement compose lives in `local/cloud/docker-compose.yml`. See `local/README.md` for verification commands.
 
 ## Configuration
 
