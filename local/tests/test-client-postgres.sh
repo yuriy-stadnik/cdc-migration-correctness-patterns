@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+
+require_container_running local-cloud-client-postgres
+docker exec local-cloud-client-postgres pg_isready -U appuser -d clientdb >/dev/null
+
+require_sql_count local-cloud-client-postgres clientdb 1 "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'client' AND table_name = 'customers'"
+require_sql_count local-cloud-client-postgres clientdb 1 "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'client' AND table_name = 'addresses'"
+require_sql_count local-cloud-client-postgres clientdb 1 "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'client' AND table_name = 'customers' AND column_name = 'source_tx_id'"
+require_sql_count local-cloud-client-postgres clientdb 1 "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'cdc' AND table_name = 'transaction_metadata'"
+
+docker exec -i local-cloud-client-postgres psql -U appuser -d clientdb <<'SQL'
+SELECT 'customers' AS table_name, count(*) FROM client.customers
+UNION ALL SELECT 'addresses', count(*) FROM client.addresses
+UNION ALL SELECT 'transaction_metadata', count(*) FROM cdc.transaction_metadata
+ORDER BY table_name;
+SQL
+
+echo "client-postgres: ok"

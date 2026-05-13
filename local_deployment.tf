@@ -36,7 +36,8 @@ resource "terraform_data" "local_cloud_deployment" {
     filesha256("${path.module}/local/cloud/lambda-consumer/build.gradle"),
     filesha256("${path.module}/local/cloud/lambda-consumer/settings.gradle"),
     filesha256("${path.module}/local/cloud/lambda-consumer/src/main/java/com/example/local/LocalLambdaConsumer.java"),
-    filesha256("${path.module}/local/cloud/postgres/init/01-schema.sql")
+    filesha256("${path.module}/local/cloud/postgres/client-init/01-schema.sql"),
+    filesha256("${path.module}/local/cloud/postgres/operational-init/01-schema.sql")
   ]
 
   depends_on = [terraform_data.local_docker_network]

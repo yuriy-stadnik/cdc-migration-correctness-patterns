@@ -42,7 +42,9 @@ The Terraform configuration creates:
 │   └── connect-kafka-mm2.bat  # Windows helper for EC2 Instance Connect SSH
 ├── user_data.sh.tpl          # EC2 bootstrap script for Kafka and MirrorMaker2
 ├── variables.tf              # Input variables
-├── local/                    # Local Docker integration stack
+├── local/                    # Local Docker integration stack, scripts, and component tests
+│   ├── scripts/              # Local deployment and E2E helpers
+│   └── tests/                # Component-level local stack checks
 ├── tmp/lambda_test.sh        # Manual Lambda invoke helper
 └── lambda_java/
     ├── build.gradle          # Java Lambda build configuration
@@ -87,11 +89,13 @@ For local development without MSK, Lambda, or Aurora, Terraform can start a spli
 
 ```text
 source compose:
-  PostgreSQL -> Debezium CDC -> Kafka -> Flink -> operational.* Kafka topics -> MirrorMaker2
+  PostgreSQL -> Debezium CDC -> Kafka -> Flink -> client.* and operational.* Kafka topics -> MirrorMaker2
 
 cloud replacement compose:
-  Kafka -> local Lambda replacement -> PostgreSQL
+  Kafka -> local Lambda replacement -> client PostgreSQL + operational PostgreSQL
 ```
+
+The local split flow preserves Debezium transaction metadata by replicating `pg1.transaction`, adding source transaction fields to every derived topic, and storing them on destination tables for consistency checks, replay, and deduplication.
 
 Run it with Terraform:
 
@@ -106,13 +110,41 @@ terraform apply \
 Run a delivery test:
 
 ```bash
-./scripts/run-local-e2e.sh
+./local/scripts/run-local-e2e.sh
+```
+
+Start or stop the split local deployment without running the E2E assertions:
+
+```bash
+./local/scripts/start-local.sh
+./local/scripts/stop-local.sh
+DELETE_VOLUMES=1 ./local/scripts/stop-local.sh
 ```
 
 Reset both local compose stacks and rerun from a clean slate:
 
 ```bash
-RESET=1 ./scripts/run-local-e2e.sh
+RESET=1 ./local/scripts/run-local-e2e.sh
+```
+
+Run component checks separately after the local stack is up:
+
+```bash
+./local/tests/test-source-postgres.sh
+./local/tests/test-debezium-connect.sh
+./local/tests/test-source-kafka.sh
+./local/tests/test-flink.sh
+./local/tests/test-mirrormaker2.sh
+./local/tests/test-cloud-kafka.sh
+./local/tests/test-client-postgres.sh
+./local/tests/test-operational-postgres.sh
+./local/tests/test-local-lambda.sh
+```
+
+Run all component checks:
+
+```bash
+./local/tests/run-all-components.sh
 ```
 
 The source compose lives in `local/source/docker-compose.yml`; the cloud replacement compose lives in `local/cloud/docker-compose.yml`. See `local/README.md` for verification commands.

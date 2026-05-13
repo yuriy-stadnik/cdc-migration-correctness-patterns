@@ -13,8 +13,19 @@ CREATE TABLE IF NOT EXISTS customer_projection (
 );
 
 CREATE SCHEMA IF NOT EXISTS operational;
+CREATE SCHEMA IF NOT EXISTS client;
 
-CREATE TABLE IF NOT EXISTS operational.addresses (
+CREATE TABLE IF NOT EXISTS client.customers (
+  id BIGINT PRIMARY KEY,
+  first_name TEXT NOT NULL,
+  last_name TEXT NOT NULL,
+  email TEXT,
+  status TEXT,
+  created_at TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS client.addresses (
   customer_id BIGINT NOT NULL,
   address_type TEXT NOT NULL,
   street TEXT,

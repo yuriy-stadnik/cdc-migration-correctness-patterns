@@ -78,7 +78,24 @@ CREATE TABLE customer_projection (
   'password' = 'apppass'
 );
 
-CREATE TABLE operational_addresses (
+CREATE TABLE client_customers (
+  id BIGINT,
+  first_name STRING,
+  last_name STRING,
+  email STRING,
+  status STRING,
+  created_at TIMESTAMP(3),
+  updated_at TIMESTAMP(3),
+  PRIMARY KEY (id) NOT ENFORCED
+) WITH (
+  'connector' = 'jdbc',
+  'url' = 'jdbc:postgresql://target-postgres:5432/microservices',
+  'table-name' = 'client.customers',
+  'username' = 'appuser',
+  'password' = 'apppass'
+);
+
+CREATE TABLE client_addresses (
   customer_id BIGINT,
   address_type STRING,
   street STRING,
@@ -89,7 +106,7 @@ CREATE TABLE operational_addresses (
 ) WITH (
   'connector' = 'jdbc',
   'url' = 'jdbc:postgresql://target-postgres:5432/microservices',
-  'table-name' = 'operational.addresses',
+  'table-name' = 'client.addresses',
   'username' = 'appuser',
   'password' = 'apppass'
 );
@@ -189,7 +206,24 @@ CREATE TABLE operational_order_items_topic (
   'value.format' = 'json'
 );
 
-CREATE TABLE operational_addresses_topic (
+CREATE TABLE client_customers_topic (
+  id BIGINT,
+  first_name STRING,
+  last_name STRING,
+  email STRING,
+  status STRING,
+  created_at TIMESTAMP(3),
+  updated_at TIMESTAMP(3),
+  PRIMARY KEY (id) NOT ENFORCED
+) WITH (
+  'connector' = 'upsert-kafka',
+  'topic' = 'client.customers',
+  'properties.bootstrap.servers' = 'kafka:29092',
+  'key.format' = 'json',
+  'value.format' = 'json'
+);
+
+CREATE TABLE client_addresses_topic (
   customer_id BIGINT,
   address_type STRING,
   street STRING,
@@ -199,7 +233,7 @@ CREATE TABLE operational_addresses_topic (
   PRIMARY KEY (customer_id, address_type) NOT ENFORCED
 ) WITH (
   'connector' = 'upsert-kafka',
-  'topic' = 'operational.addresses',
+  'topic' = 'client.addresses',
   'properties.bootstrap.servers' = 'kafka:29092',
   'key.format' = 'json',
   'value.format' = 'json'
@@ -233,7 +267,29 @@ SELECT
   'v1' AS schema_version
 FROM customers_cdc;
 
-INSERT INTO operational_addresses
+INSERT INTO client_customers
+SELECT
+  id,
+  first_name,
+  last_name,
+  email,
+  COALESCE(status, 'ACTIVE') AS status,
+  CAST(REPLACE(SUBSTRING(created_at, 1, 19), 'T', ' ') AS TIMESTAMP(3)) AS created_at,
+  CAST(REPLACE(SUBSTRING(updated_at, 1, 19), 'T', ' ') AS TIMESTAMP(3)) AS updated_at
+FROM customers_cdc;
+
+INSERT INTO client_customers_topic
+SELECT
+  id,
+  first_name,
+  last_name,
+  email,
+  COALESCE(status, 'ACTIVE') AS status,
+  CAST(REPLACE(SUBSTRING(created_at, 1, 19), 'T', ' ') AS TIMESTAMP(3)) AS created_at,
+  CAST(REPLACE(SUBSTRING(updated_at, 1, 19), 'T', ' ') AS TIMESTAMP(3)) AS updated_at
+FROM customers_cdc;
+
+INSERT INTO client_addresses
 SELECT
   customer_id,
   'HOME' AS address_type,
@@ -267,7 +323,7 @@ SELECT
 FROM orders_flat_cdc
 WHERE product_name IS NOT NULL;
 
-INSERT INTO operational_addresses_topic
+INSERT INTO client_addresses_topic
 SELECT
   customer_id,
   'HOME' AS address_type,
