@@ -1,4 +1,6 @@
 resource "aws_msk_serverless_cluster" "this" {
+  count = var.enable_msk ? 1 : 0
+
   cluster_name = "${var.project}-msk"
 
   vpc_config {

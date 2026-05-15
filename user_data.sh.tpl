@@ -208,7 +208,7 @@ chmod +x /opt/lab/integration-test-cdc-to-kafka.sh
 # -------------------------------------------------------------------
 # On-prem emulator files: legacy PostgreSQL CDC -> Kafka -> Flink
 # -------------------------------------------------------------------
-mkdir -p /opt/lab/postgres/init /opt/lab/target/init /opt/lab/connectors /opt/lab/flink/sql
+mkdir -p /opt/lab/postgres/init /opt/lab/connectors /opt/lab/flink/sql
 mkdir -p /opt/lab/flink-usrlib/plugins/kafka
 
 curl -fL "https://repo1.maven.org/maven2/org/apache/flink/flink-connector-jdbc/3.2.0-1.19/flink-connector-jdbc-3.2.0-1.19.jar" \
@@ -315,62 +315,6 @@ SET product_name = EXCLUDED.product_name,
     total_price = EXCLUDED.total_price;
 EOF
 
-cat > /opt/lab/target/init/01-schema.sql <<'EOF'
-CREATE TABLE IF NOT EXISTS customer_projection (
-  id BIGINT PRIMARY KEY,
-  email TEXT,
-  full_name TEXT NOT NULL,
-  status TEXT NOT NULL,
-  source_system TEXT NOT NULL DEFAULT 'legacy-postgres',
-  source_table TEXT NOT NULL DEFAULT 'inventory.customers',
-  source_lsn TEXT,
-  source_tx_id TEXT,
-  source_event_time TEXT,
-  ingested_at TEXT NOT NULL DEFAULT NOW()::TEXT,
-  schema_version TEXT NOT NULL DEFAULT 'v1'
-);
-
-CREATE SCHEMA IF NOT EXISTS operational;
-
-CREATE TABLE IF NOT EXISTS operational.addresses (
-  customer_id BIGINT NOT NULL,
-  address_type TEXT NOT NULL,
-  street TEXT,
-  city TEXT,
-  state TEXT,
-  zip_code TEXT,
-  PRIMARY KEY (customer_id, address_type)
-);
-
-CREATE TABLE IF NOT EXISTS operational.contact_numbers (
-  customer_id BIGINT NOT NULL,
-  phone_type TEXT NOT NULL,
-  phone_number TEXT NOT NULL,
-  PRIMARY KEY (customer_id, phone_type)
-);
-
-CREATE TABLE IF NOT EXISTS operational.products (
-  name TEXT PRIMARY KEY,
-  category TEXT,
-  current_price DECIMAL(10,2)
-);
-
-CREATE TABLE IF NOT EXISTS operational.orders (
-  id BIGINT PRIMARY KEY,
-  customer_id BIGINT,
-  order_date TIMESTAMPTZ,
-  status TEXT
-);
-
-CREATE TABLE IF NOT EXISTS operational.order_items (
-  order_id BIGINT NOT NULL,
-  product_name TEXT NOT NULL,
-  quantity INTEGER,
-  price_at_purchase DECIMAL(10,2),
-  PRIMARY KEY (order_id, product_name)
-);
-EOF
-
 cat > /opt/lab/connectors/legacy-postgres-source-config.json <<'EOF'
 {
   "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
@@ -387,6 +331,7 @@ cat > /opt/lab/connectors/legacy-postgres-source-config.json <<'EOF'
   "slot.name": "dbz_slot",
   "publication.autocreate.mode": "filtered",
   "snapshot.mode": "initial",
+  "provide.transaction.metadata": "true",
   "tombstones.on.delete": "false",
   "decimal.handling.mode": "string",
   "time.precision.mode": "adaptive_time_microseconds",
@@ -401,157 +346,162 @@ cat > /opt/lab/flink/sql/init.sql <<'EOF'
 SET 'execution.checkpointing.interval' = '10s';
 
 CREATE TABLE customers_cdc (
-  id BIGINT,
-  first_name STRING,
-  last_name STRING,
-  email STRING,
-  status STRING,
-  created_at STRING,
-  updated_at STRING,
-  PRIMARY KEY (id) NOT ENFORCED
+  `before` ROW<
+    id BIGINT,
+    first_name STRING,
+    last_name STRING,
+    email STRING,
+    status STRING,
+    created_at STRING,
+    updated_at STRING
+  >,
+  `after` ROW<
+    id BIGINT,
+    first_name STRING,
+    last_name STRING,
+    email STRING,
+    status STRING,
+    created_at STRING,
+    updated_at STRING
+  >,
+  op STRING,
+  ts_ms BIGINT,
+  `transaction` ROW<id STRING, total_order BIGINT, data_collection_order BIGINT>
 ) WITH (
   'connector' = 'kafka',
   'topic' = 'pg1.inventory.customers',
   'properties.bootstrap.servers' = 'kafka:29092',
   'scan.startup.mode' = 'earliest-offset',
-  'format' = 'debezium-json'
+  'format' = 'json',
+  'json.ignore-parse-errors' = 'true'
 );
 
 CREATE TABLE accounts_cdc (
-  account_id BIGINT,
-  customer_id BIGINT,
-  account_type STRING,
-  balance DECIMAL(15,2),
-  street STRING,
-  city STRING,
-  state STRING,
-  zip_code STRING,
-  home_phone STRING,
-  work_phone STRING,
-  mobile_phone STRING,
-  created_at STRING,
-  PRIMARY KEY (account_id) NOT ENFORCED
+  `before` ROW<
+    account_id BIGINT,
+    customer_id BIGINT,
+    account_type STRING,
+    balance DECIMAL(15,2),
+    street STRING,
+    city STRING,
+    state STRING,
+    zip_code STRING,
+    home_phone STRING,
+    work_phone STRING,
+    mobile_phone STRING,
+    created_at STRING
+  >,
+  `after` ROW<
+    account_id BIGINT,
+    customer_id BIGINT,
+    account_type STRING,
+    balance DECIMAL(15,2),
+    street STRING,
+    city STRING,
+    state STRING,
+    zip_code STRING,
+    home_phone STRING,
+    work_phone STRING,
+    mobile_phone STRING,
+    created_at STRING
+  >,
+  op STRING,
+  ts_ms BIGINT,
+  `transaction` ROW<id STRING, total_order BIGINT, data_collection_order BIGINT>
 ) WITH (
   'connector' = 'kafka',
   'topic' = 'pg1.inventory.accounts',
   'properties.bootstrap.servers' = 'kafka:29092',
   'scan.startup.mode' = 'earliest-offset',
-  'format' = 'debezium-json'
+  'format' = 'json',
+  'json.ignore-parse-errors' = 'true'
 );
 
 CREATE TABLE orders_flat_cdc (
-  order_id BIGINT,
-  customer_id BIGINT,
-  order_date STRING,
-  product_name STRING,
-  product_category STRING,
-  unit_price DECIMAL(10,2),
-  quantity INT,
-  total_price DECIMAL(10,2),
-  PRIMARY KEY (order_id) NOT ENFORCED
+  `before` ROW<
+    order_id BIGINT,
+    customer_id BIGINT,
+    order_date STRING,
+    product_name STRING,
+    product_category STRING,
+    unit_price DECIMAL(10,2),
+    quantity INT,
+    total_price DECIMAL(10,2)
+  >,
+  `after` ROW<
+    order_id BIGINT,
+    customer_id BIGINT,
+    order_date STRING,
+    product_name STRING,
+    product_category STRING,
+    unit_price DECIMAL(10,2),
+    quantity INT,
+    total_price DECIMAL(10,2)
+  >,
+  op STRING,
+  ts_ms BIGINT,
+  `transaction` ROW<id STRING, total_order BIGINT, data_collection_order BIGINT>
 ) WITH (
   'connector' = 'kafka',
   'topic' = 'pg1.inventory.orders_flat',
   'properties.bootstrap.servers' = 'kafka:29092',
   'scan.startup.mode' = 'earliest-offset',
-  'format' = 'debezium-json'
+  'format' = 'json',
+  'json.ignore-parse-errors' = 'true'
 );
 
-CREATE TABLE customer_projection (
+CREATE TABLE client_customers_topic (
   id BIGINT,
+  first_name STRING,
+  last_name STRING,
   email STRING,
-  full_name STRING,
   status STRING,
-  source_system STRING,
-  source_table STRING,
-  source_lsn STRING,
+  created_at TIMESTAMP(3),
+  updated_at TIMESTAMP(3),
+  source_record_type STRING,
+  source_ts_ms BIGINT,
   source_tx_id STRING,
-  source_event_time STRING,
-  ingested_at STRING,
-  schema_version STRING,
+  source_tx_total_order BIGINT,
+  source_tx_data_collection_order BIGINT,
   PRIMARY KEY (id) NOT ENFORCED
 ) WITH (
-  'connector' = 'jdbc',
-  'url' = 'jdbc:postgresql://target-postgres:5432/microservices',
-  'table-name' = 'customer_projection',
-  'username' = 'appuser',
-  'password' = 'apppass'
+  'connector' = 'upsert-kafka',
+  'topic' = 'client.customers',
+  'properties.bootstrap.servers' = 'kafka:29092',
+  'key.format' = 'json',
+  'value.format' = 'json'
 );
 
-CREATE TABLE operational_addresses (
+CREATE TABLE client_addresses_topic (
   customer_id BIGINT,
   address_type STRING,
   street STRING,
   city STRING,
   state STRING,
   zip_code STRING,
+  source_record_type STRING,
+  source_ts_ms BIGINT,
+  source_tx_id STRING,
+  source_tx_total_order BIGINT,
+  source_tx_data_collection_order BIGINT,
   PRIMARY KEY (customer_id, address_type) NOT ENFORCED
 ) WITH (
-  'connector' = 'jdbc',
-  'url' = 'jdbc:postgresql://target-postgres:5432/microservices',
-  'table-name' = 'operational.addresses',
-  'username' = 'appuser',
-  'password' = 'apppass'
-);
-
-CREATE TABLE operational_contact_numbers (
-  customer_id BIGINT,
-  phone_type STRING,
-  phone_number STRING,
-  PRIMARY KEY (customer_id, phone_type) NOT ENFORCED
-) WITH (
-  'connector' = 'jdbc',
-  'url' = 'jdbc:postgresql://target-postgres:5432/microservices',
-  'table-name' = 'operational.contact_numbers',
-  'username' = 'appuser',
-  'password' = 'apppass'
-);
-
-CREATE TABLE operational_products (
-  name STRING,
-  category STRING,
-  current_price DECIMAL(10,2),
-  PRIMARY KEY (name) NOT ENFORCED
-) WITH (
-  'connector' = 'jdbc',
-  'url' = 'jdbc:postgresql://target-postgres:5432/microservices',
-  'table-name' = 'operational.products',
-  'username' = 'appuser',
-  'password' = 'apppass'
-);
-
-CREATE TABLE operational_orders (
-  id BIGINT,
-  customer_id BIGINT,
-  order_date TIMESTAMP(3),
-  status STRING,
-  PRIMARY KEY (id) NOT ENFORCED
-) WITH (
-  'connector' = 'jdbc',
-  'url' = 'jdbc:postgresql://target-postgres:5432/microservices',
-  'table-name' = 'operational.orders',
-  'username' = 'appuser',
-  'password' = 'apppass'
-);
-
-CREATE TABLE operational_order_items (
-  order_id BIGINT,
-  product_name STRING,
-  quantity INT,
-  price_at_purchase DECIMAL(10,2),
-  PRIMARY KEY (order_id, product_name) NOT ENFORCED
-) WITH (
-  'connector' = 'jdbc',
-  'url' = 'jdbc:postgresql://target-postgres:5432/microservices',
-  'table-name' = 'operational.order_items',
-  'username' = 'appuser',
-  'password' = 'apppass'
+  'connector' = 'upsert-kafka',
+  'topic' = 'client.addresses',
+  'properties.bootstrap.servers' = 'kafka:29092',
+  'key.format' = 'json',
+  'value.format' = 'json'
 );
 
 CREATE TABLE operational_products_topic (
   name STRING,
   category STRING,
   current_price DECIMAL(10,2),
+  source_record_type STRING,
+  source_ts_ms BIGINT,
+  source_tx_id STRING,
+  source_tx_total_order BIGINT,
+  source_tx_data_collection_order BIGINT,
   PRIMARY KEY (name) NOT ENFORCED
 ) WITH (
   'connector' = 'upsert-kafka',
@@ -566,6 +516,11 @@ CREATE TABLE operational_orders_topic (
   customer_id BIGINT,
   order_date TIMESTAMP(3),
   status STRING,
+  source_record_type STRING,
+  source_ts_ms BIGINT,
+  source_tx_id STRING,
+  source_tx_total_order BIGINT,
+  source_tx_data_collection_order BIGINT,
   PRIMARY KEY (id) NOT ENFORCED
 ) WITH (
   'connector' = 'upsert-kafka',
@@ -580,6 +535,11 @@ CREATE TABLE operational_order_items_topic (
   product_name STRING,
   quantity INT,
   price_at_purchase DECIMAL(10,2),
+  source_record_type STRING,
+  source_ts_ms BIGINT,
+  source_tx_id STRING,
+  source_tx_total_order BIGINT,
+  source_tx_data_collection_order BIGINT,
   PRIMARY KEY (order_id, product_name) NOT ENFORCED
 ) WITH (
   'connector' = 'upsert-kafka',
@@ -589,26 +549,15 @@ CREATE TABLE operational_order_items_topic (
   'value.format' = 'json'
 );
 
-CREATE TABLE operational_addresses_topic (
-  customer_id BIGINT,
-  address_type STRING,
-  street STRING,
-  city STRING,
-  state STRING,
-  zip_code STRING,
-  PRIMARY KEY (customer_id, address_type) NOT ENFORCED
-) WITH (
-  'connector' = 'upsert-kafka',
-  'topic' = 'operational.addresses',
-  'properties.bootstrap.servers' = 'kafka:29092',
-  'key.format' = 'json',
-  'value.format' = 'json'
-);
-
 CREATE TABLE operational_contact_numbers_topic (
   customer_id BIGINT,
   phone_type STRING,
   phone_number STRING,
+  source_record_type STRING,
+  source_ts_ms BIGINT,
+  source_tx_id STRING,
+  source_tx_total_order BIGINT,
+  source_tx_data_collection_order BIGINT,
   PRIMARY KEY (customer_id, phone_type) NOT ENFORCED
 ) WITH (
   'connector' = 'upsert-kafka',
@@ -618,122 +567,117 @@ CREATE TABLE operational_contact_numbers_topic (
   'value.format' = 'json'
 );
 
-INSERT INTO customer_projection
+INSERT INTO client_customers_topic
 SELECT
-  id,
-  email,
-  CONCAT(first_name, ' ', last_name) AS full_name,
-  COALESCE(status, 'ACTIVE') AS status,
-  'legacy-postgres' AS source_system,
-  'inventory.customers' AS source_table,
-  CAST(NULL AS STRING) AS source_lsn,
-  CAST(NULL AS STRING) AS source_tx_id,
-  CAST(NULL AS STRING) AS source_event_time,
-  CAST(CURRENT_TIMESTAMP AS STRING) AS ingested_at,
-  'v1' AS schema_version
+  COALESCE(`after`.id, `before`.id) AS id,
+  COALESCE(`after`.first_name, `before`.first_name) AS first_name,
+  COALESCE(`after`.last_name, `before`.last_name) AS last_name,
+  COALESCE(`after`.email, `before`.email) AS email,
+  COALESCE(`after`.status, `before`.status) AS status,
+  CAST(REPLACE(SUBSTRING(COALESCE(`after`.created_at, `before`.created_at), 1, 19), 'T', ' ') AS TIMESTAMP(3)) AS created_at,
+  CAST(REPLACE(SUBSTRING(COALESCE(`after`.updated_at, `before`.updated_at), 1, 19), 'T', ' ') AS TIMESTAMP(3)) AS updated_at,
+  CASE op WHEN 'c' THEN 'I' WHEN 'r' THEN 'I' WHEN 'u' THEN 'U' WHEN 'd' THEN 'D' ELSE op END AS source_record_type,
+  ts_ms AS source_ts_ms,
+  `transaction`.id AS source_tx_id,
+  `transaction`.total_order AS source_tx_total_order,
+  `transaction`.data_collection_order AS source_tx_data_collection_order
 FROM customers_cdc;
 
-INSERT INTO operational_addresses
+INSERT INTO client_addresses_topic
 SELECT
-  customer_id,
+  COALESCE(`after`.customer_id, `before`.customer_id) AS customer_id,
   'HOME' AS address_type,
-  street,
-  city,
-  state,
-  zip_code
+  COALESCE(`after`.street, `before`.street) AS street,
+  COALESCE(`after`.city, `before`.city) AS city,
+  COALESCE(`after`.state, `before`.state) AS state,
+  COALESCE(`after`.zip_code, `before`.zip_code) AS zip_code,
+  CASE op WHEN 'c' THEN 'I' WHEN 'r' THEN 'I' WHEN 'u' THEN 'U' WHEN 'd' THEN 'D' ELSE op END AS source_record_type,
+  ts_ms AS source_ts_ms,
+  `transaction`.id AS source_tx_id,
+  `transaction`.total_order AS source_tx_total_order,
+  `transaction`.data_collection_order AS source_tx_data_collection_order
 FROM accounts_cdc
-WHERE street IS NOT NULL;
-
-INSERT INTO operational_contact_numbers
-SELECT customer_id, 'HOME' AS phone_type, home_phone AS phone_number
-FROM accounts_cdc
-WHERE home_phone IS NOT NULL;
-
-INSERT INTO operational_contact_numbers
-SELECT customer_id, 'WORK' AS phone_type, work_phone AS phone_number
-FROM accounts_cdc
-WHERE work_phone IS NOT NULL;
-
-INSERT INTO operational_contact_numbers
-SELECT customer_id, 'MOBILE' AS phone_type, mobile_phone AS phone_number
-FROM accounts_cdc
-WHERE mobile_phone IS NOT NULL;
-
-INSERT INTO operational_products
-SELECT
-  product_name AS name,
-  product_category AS category,
-  unit_price AS current_price
-FROM orders_flat_cdc
-WHERE product_name IS NOT NULL;
-
-INSERT INTO operational_orders
-SELECT
-  order_id AS id,
-  customer_id,
-  CAST(REPLACE(SUBSTRING(order_date, 1, 19), 'T', ' ') AS TIMESTAMP(3)) AS order_date,
-  'COMPLETED' AS status
-FROM orders_flat_cdc;
-
-INSERT INTO operational_order_items
-SELECT
-  order_id,
-  product_name,
-  quantity,
-  unit_price AS price_at_purchase
-FROM orders_flat_cdc
-WHERE product_name IS NOT NULL;
-
-INSERT INTO operational_addresses_topic
-SELECT
-  customer_id,
-  'HOME' AS address_type,
-  street,
-  city,
-  state,
-  zip_code
-FROM accounts_cdc
-WHERE street IS NOT NULL;
+WHERE COALESCE(`after`.street, `before`.street) IS NOT NULL;
 
 INSERT INTO operational_contact_numbers_topic
-SELECT customer_id, 'HOME' AS phone_type, home_phone AS phone_number
+SELECT
+  COALESCE(`after`.customer_id, `before`.customer_id) AS customer_id,
+  'HOME' AS phone_type,
+  COALESCE(`after`.home_phone, `before`.home_phone) AS phone_number,
+  CASE op WHEN 'c' THEN 'I' WHEN 'r' THEN 'I' WHEN 'u' THEN 'U' WHEN 'd' THEN 'D' ELSE op END AS source_record_type,
+  ts_ms AS source_ts_ms,
+  `transaction`.id AS source_tx_id,
+  `transaction`.total_order AS source_tx_total_order,
+  `transaction`.data_collection_order AS source_tx_data_collection_order
 FROM accounts_cdc
-WHERE home_phone IS NOT NULL;
+WHERE COALESCE(`after`.home_phone, `before`.home_phone) IS NOT NULL;
 
 INSERT INTO operational_contact_numbers_topic
-SELECT customer_id, 'WORK' AS phone_type, work_phone AS phone_number
+SELECT
+  COALESCE(`after`.customer_id, `before`.customer_id) AS customer_id,
+  'WORK' AS phone_type,
+  COALESCE(`after`.work_phone, `before`.work_phone) AS phone_number,
+  CASE op WHEN 'c' THEN 'I' WHEN 'r' THEN 'I' WHEN 'u' THEN 'U' WHEN 'd' THEN 'D' ELSE op END AS source_record_type,
+  ts_ms AS source_ts_ms,
+  `transaction`.id AS source_tx_id,
+  `transaction`.total_order AS source_tx_total_order,
+  `transaction`.data_collection_order AS source_tx_data_collection_order
 FROM accounts_cdc
-WHERE work_phone IS NOT NULL;
+WHERE COALESCE(`after`.work_phone, `before`.work_phone) IS NOT NULL;
 
 INSERT INTO operational_contact_numbers_topic
-SELECT customer_id, 'MOBILE' AS phone_type, mobile_phone AS phone_number
+SELECT
+  COALESCE(`after`.customer_id, `before`.customer_id) AS customer_id,
+  'MOBILE' AS phone_type,
+  COALESCE(`after`.mobile_phone, `before`.mobile_phone) AS phone_number,
+  CASE op WHEN 'c' THEN 'I' WHEN 'r' THEN 'I' WHEN 'u' THEN 'U' WHEN 'd' THEN 'D' ELSE op END AS source_record_type,
+  ts_ms AS source_ts_ms,
+  `transaction`.id AS source_tx_id,
+  `transaction`.total_order AS source_tx_total_order,
+  `transaction`.data_collection_order AS source_tx_data_collection_order
 FROM accounts_cdc
-WHERE mobile_phone IS NOT NULL;
+WHERE COALESCE(`after`.mobile_phone, `before`.mobile_phone) IS NOT NULL;
 
 INSERT INTO operational_products_topic
 SELECT
-  product_name AS name,
-  product_category AS category,
-  unit_price AS current_price
+  COALESCE(`after`.product_name, `before`.product_name) AS name,
+  COALESCE(`after`.product_category, `before`.product_category) AS category,
+  COALESCE(`after`.unit_price, `before`.unit_price) AS current_price,
+  CASE op WHEN 'c' THEN 'I' WHEN 'r' THEN 'I' WHEN 'u' THEN 'U' WHEN 'd' THEN 'D' ELSE op END AS source_record_type,
+  ts_ms AS source_ts_ms,
+  `transaction`.id AS source_tx_id,
+  `transaction`.total_order AS source_tx_total_order,
+  `transaction`.data_collection_order AS source_tx_data_collection_order
 FROM orders_flat_cdc
-WHERE product_name IS NOT NULL;
+WHERE COALESCE(`after`.product_name, `before`.product_name) IS NOT NULL;
 
 INSERT INTO operational_orders_topic
 SELECT
-  order_id AS id,
-  customer_id,
-  CAST(REPLACE(SUBSTRING(order_date, 1, 19), 'T', ' ') AS TIMESTAMP(3)) AS order_date,
-  'COMPLETED' AS status
-FROM orders_flat_cdc;
+  COALESCE(`after`.order_id, `before`.order_id) AS id,
+  COALESCE(`after`.customer_id, `before`.customer_id) AS customer_id,
+  CAST(REPLACE(SUBSTRING(COALESCE(`after`.order_date, `before`.order_date), 1, 19), 'T', ' ') AS TIMESTAMP(3)) AS order_date,
+  'COMPLETED' AS status,
+  CASE op WHEN 'c' THEN 'I' WHEN 'r' THEN 'I' WHEN 'u' THEN 'U' WHEN 'd' THEN 'D' ELSE op END AS source_record_type,
+  ts_ms AS source_ts_ms,
+  `transaction`.id AS source_tx_id,
+  `transaction`.total_order AS source_tx_total_order,
+  `transaction`.data_collection_order AS source_tx_data_collection_order
+FROM orders_flat_cdc
+WHERE COALESCE(`after`.order_id, `before`.order_id) IS NOT NULL;
 
 INSERT INTO operational_order_items_topic
 SELECT
-  order_id,
-  product_name,
-  quantity,
-  unit_price AS price_at_purchase
+  COALESCE(`after`.order_id, `before`.order_id) AS order_id,
+  COALESCE(`after`.product_name, `before`.product_name) AS product_name,
+  COALESCE(`after`.quantity, `before`.quantity) AS quantity,
+  COALESCE(`after`.unit_price, `before`.unit_price) AS price_at_purchase,
+  CASE op WHEN 'c' THEN 'I' WHEN 'r' THEN 'I' WHEN 'u' THEN 'U' WHEN 'd' THEN 'D' ELSE op END AS source_record_type,
+  ts_ms AS source_ts_ms,
+  `transaction`.id AS source_tx_id,
+  `transaction`.total_order AS source_tx_total_order,
+  `transaction`.data_collection_order AS source_tx_data_collection_order
 FROM orders_flat_cdc
-WHERE product_name IS NOT NULL;
+WHERE COALESCE(`after`.product_name, `before`.product_name) IS NOT NULL;
 EOF
 
 # -------------------------------------------------------------------
@@ -753,9 +697,9 @@ target.bootstrap.servers = ${msk_bootstrap_iam}
 source->target.enabled = true
 target->source.enabled = false
 
-# Mirror everything (lab)
-source->target.topics = .*
-source->target.groups = .*
+# Mirror only required business topics and selected groups
+source->target.topics = ${mm2_topic_allowlist}
+source->target.groups = ${mm2_group_allowlist}
 
 # Serverless-safe replication defaults
 replication.factor = 1
@@ -805,7 +749,6 @@ networks:
 
 volumes:
   legacy-postgres-data: {}
-  target-postgres-data: {}
   zookeeper-data: {}
   zookeeper-log: {}
   kafka-data: {}
@@ -899,26 +842,6 @@ services:
         PGPASSWORD=postgres psql -v ON_ERROR_STOP=1 -h legacy-postgres -U postgres -d appdb -f /init/01-role-and-grants.sql
         PGPASSWORD=postgres psql -v ON_ERROR_STOP=1 -h legacy-postgres -U postgres -d appdb -f /init/02-inventory.sql
         echo "pg-init done."
-
-  target-postgres:
-    image: postgres:16-alpine
-    hostname: target-postgres
-    restart: unless-stopped
-    networks: [cdc]
-    ports:
-      - "5433:5432"
-    environment:
-      POSTGRES_DB: microservices
-      POSTGRES_USER: appuser
-      POSTGRES_PASSWORD: apppass
-    volumes:
-      - target-postgres-data:/var/lib/postgresql/data
-      - ./target/init:/docker-entrypoint-initdb.d:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U appuser -d microservices"]
-      interval: 5s
-      timeout: 3s
-      retries: 30
 
   connect:
     image: debezium/connect:2.7.3.Final
@@ -1034,8 +957,6 @@ services:
     depends_on:
       dbz-init:
         condition: service_completed_successfully
-      target-postgres:
-        condition: service_healthy
       flink-jobmanager:
         condition: service_started
       flink-taskmanager:

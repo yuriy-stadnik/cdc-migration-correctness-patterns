@@ -3,6 +3,12 @@ variable "aws_region" {
   default = "us-east-1"
 }
 
+variable "enable_msk" {
+  description = "When true, provision MSK Serverless and MSK-triggered Lambda mappings. Keep false for local-only or EC2-only testing to reduce cost."
+  type        = bool
+  default     = false
+}
+
 variable "project" {
   type    = string
   default = "kafka-mm2-msk-lab"
@@ -25,6 +31,18 @@ variable "ec2_msk_bootstrap_iam" {
   default     = ""
 }
 
+variable "mm2_topic_allowlist_regex" {
+  description = "Regex for MM2 source->target topic replication when MSK replication is enabled."
+  type        = string
+  default     = "(operational[.].*|client[.].*|pg1[.]transaction)"
+}
+
+variable "mm2_group_allowlist_regex" {
+  description = "Regex for MM2 source->target consumer group sync when MSK replication is enabled."
+  type        = string
+  default     = "__no_groups__"
+}
+
 variable "ssh_cidr" {
   description = "Your public IP /32 for SSH"
   type        = string
@@ -45,4 +63,22 @@ variable "db_name" {
 variable "db_username" {
   type    = string
   default = "appuser"
+}
+
+variable "client_db_name" {
+  description = "Aurora database name for client projection data."
+  type        = string
+  default     = "clientdb"
+}
+
+variable "operational_db_name" {
+  description = "Aurora database name for operational projection data."
+  type        = string
+  default     = "operationaldb"
+}
+
+variable "aurora_instance_class" {
+  description = "Instance class for Aurora PostgreSQL instances."
+  type        = string
+  default     = "db.t3.medium"
 }

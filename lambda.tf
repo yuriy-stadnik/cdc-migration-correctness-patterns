@@ -25,6 +25,8 @@ resource "aws_iam_role_policy_attachment" "lambda_vpc_access" {
 
 # Minimum required permissions for MSK event source mappings
 resource "aws_iam_role_policy_attachment" "lambda_msk_exec" {
+  count = var.enable_msk ? 1 : 0
+
   role       = aws_iam_role.lambda.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaMSKExecutionRole"
 }
@@ -38,9 +40,12 @@ resource "aws_iam_role_policy" "lambda_secrets" {
     Version = "2012-10-17",
     Statement = [
       {
-        Effect   = "Allow",
-        Action   = ["secretsmanager:GetSecretValue"],
-        Resource = try(aws_rds_cluster.aurora.master_user_secret[0].secret_arn, "*")
+        Effect = "Allow",
+        Action = ["secretsmanager:GetSecretValue"],
+        Resource = [
+          try(aws_rds_cluster.aurora_client.master_user_secret[0].secret_arn, "*"),
+          try(aws_rds_cluster.aurora_operational.master_user_secret[0].secret_arn, "*")
+        ]
       },
       {
         Effect   = "Allow",
@@ -51,6 +56,8 @@ resource "aws_iam_role_policy" "lambda_secrets" {
   })
 }
 resource "aws_iam_role_policy" "lambda_msk_control_plane" {
+  count = var.enable_msk ? 1 : 0
+
   name = "${var.project}-lambda-msk-control-plane"
   role = aws_iam_role.lambda.id
 
@@ -92,32 +99,42 @@ resource "aws_lambda_function" "consumer" {
 
   environment {
     variables = {
-      DB_HOST       = aws_rds_cluster.aurora.endpoint
-      DB_PORT       = "5432"
-      DB_NAME       = var.db_name
-      DB_USER       = var.db_username
-      DB_SECRET_ARN = try(aws_rds_cluster.aurora.master_user_secret[0].secret_arn, "")
+      CLIENT_DB_HOST            = aws_rds_cluster.aurora_client.endpoint
+      CLIENT_DB_PORT            = "5432"
+      CLIENT_DB_NAME            = var.client_db_name
+      CLIENT_DB_USER            = var.db_username
+      CLIENT_DB_SECRET_ARN      = try(aws_rds_cluster.aurora_client.master_user_secret[0].secret_arn, "")
+      OPERATIONAL_DB_HOST       = aws_rds_cluster.aurora_operational.endpoint
+      OPERATIONAL_DB_PORT       = "5432"
+      OPERATIONAL_DB_NAME       = var.operational_db_name
+      OPERATIONAL_DB_USER       = var.db_username
+      OPERATIONAL_DB_SECRET_ARN = try(aws_rds_cluster.aurora_operational.master_user_secret[0].secret_arn, "")
     }
   }
 
-  depends_on = [aws_rds_cluster_instance.aurora_instance]
+  depends_on = [
+    aws_rds_cluster_instance.aurora_client_instance,
+    aws_rds_cluster_instance.aurora_operational_instance
+  ]
 }
 
 locals {
   lambda_msk_topics = toset([
+    "pg1.transaction",
+    "client.customers",
+    "client.addresses",
     "operational.products",
     "operational.orders",
     "operational.order_items",
-    "operational.addresses",
     "operational.contact_numbers"
   ])
 }
 
 # MSK -> Lambda triggers. Lambda supports one Kafka topic per event source mapping.
 resource "aws_lambda_event_source_mapping" "msk_operational" {
-  for_each = local.lambda_msk_topics
+  for_each = var.enable_msk ? local.lambda_msk_topics : toset([])
 
-  event_source_arn = aws_msk_serverless_cluster.this.arn
+  event_source_arn = aws_msk_serverless_cluster.this[0].arn
   function_name    = aws_lambda_function.consumer.arn
 
   topics            = [each.value]
@@ -135,6 +152,8 @@ resource "aws_lambda_event_source_mapping" "msk_operational" {
 }
 
 resource "aws_iam_role_policy" "lambda_msk_cluster_iam" {
+  count = var.enable_msk ? 1 : 0
+
   name = "${var.project}-lambda-msk-cluster-iam"
   role = aws_iam_role.lambda.id
 
@@ -151,10 +170,10 @@ resource "aws_iam_role_policy" "lambda_msk_cluster_iam" {
           "kafka-cluster:AlterGroup"
         ],
         Resource = [
-          aws_msk_serverless_cluster.this.arn,
-          "arn:aws:kafka:${var.aws_region}:${data.aws_caller_identity.current.account_id}:topic/${aws_msk_serverless_cluster.this.cluster_name}/*/*",
-          "arn:aws:kafka:${var.aws_region}:${data.aws_caller_identity.current.account_id}:group/${aws_msk_serverless_cluster.this.cluster_name}/*/*",
-          "arn:aws:kafka:${var.aws_region}:${data.aws_caller_identity.current.account_id}:transactional-id/${aws_msk_serverless_cluster.this.cluster_name}/*/*"
+          aws_msk_serverless_cluster.this[0].arn,
+          "arn:aws:kafka:${var.aws_region}:${data.aws_caller_identity.current.account_id}:topic/${aws_msk_serverless_cluster.this[0].cluster_name}/*/*",
+          "arn:aws:kafka:${var.aws_region}:${data.aws_caller_identity.current.account_id}:group/${aws_msk_serverless_cluster.this[0].cluster_name}/*/*",
+          "arn:aws:kafka:${var.aws_region}:${data.aws_caller_identity.current.account_id}:transactional-id/${aws_msk_serverless_cluster.this[0].cluster_name}/*/*"
         ]
       }
     ]

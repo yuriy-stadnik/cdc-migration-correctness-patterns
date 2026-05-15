@@ -1,15 +1,15 @@
 # Kafka MirrorMaker2 to MSK to Aurora
 
-This project provisions an AWS environment that moves Kafka records through Amazon MSK Serverless into an Aurora PostgreSQL database using AWS Lambda.
+This project provisions an AWS environment that mirrors the same logical flow as the local split deployment: source CDC and transformations on EC2, replication to MSK, then fan-out writes into separate client and operational Aurora PostgreSQL databases via Lambda.
 
 The AWS environment uses the public EC2 instance as an on-premises infrastructure emulator. The main flow is:
 
 1. The EC2 instance runs legacy PostgreSQL, Debezium, Kafka, Flink, Kafka UI, and MirrorMaker2 in Docker.
-2. Debezium captures CDC from `inventory.customers` and writes Kafka topic `pg1.inventory.customers`.
-3. Flink projects the local CDC stream into a local target PostgreSQL table for on-prem smoke testing.
-4. MirrorMaker2 replicates local Kafka topics to MSK Serverless using IAM authentication.
-5. A Java Lambda function is triggered from MSK topic `pg1.inventory.customers`.
-6. The Lambda function writes Kafka event payloads into Aurora PostgreSQL.
+2. Debezium captures CDC from `inventory.customers`, `inventory.accounts`, and `inventory.orders_flat` into `pg1.inventory.*` topics plus `pg1.transaction`.
+3. Flink transforms CDC events into business topics: `client.customers`, `client.addresses`, `operational.products`, `operational.orders`, `operational.order_items`, and `operational.contact_numbers`.
+4. MirrorMaker2 replicates `client.*`, `operational.*`, and `pg1.transaction` from EC2 Kafka to MSK Serverless using IAM authentication.
+5. A Java Lambda function is triggered from those MSK topics.
+6. Lambda writes to two Aurora targets: client DB (`client.*`) and operational DB (`operational.*`), and stores transaction metadata (`pg1.transaction`) in both.
 
 ## Architecture
 
@@ -18,11 +18,11 @@ The Terraform configuration creates:
 - A VPC with two public subnets and two private subnets.
 - An Internet Gateway and NAT Gateway.
 - An MSK Serverless cluster with IAM client authentication.
-- An Aurora PostgreSQL cluster in private subnets.
+- Two Aurora PostgreSQL clusters in private subnets (client and operational).
 - A public EC2 host that emulates on-prem infrastructure with Docker, PostgreSQL, Debezium, Kafka, Flink, Kafka UI, and MirrorMaker2.
 - A private EC2 network-test host.
 - A Java 17 Lambda function connected to the private subnets.
-- An MSK event source mapping that invokes Lambda from topic `pg1.inventory.customers`.
+- MSK event source mappings that invoke Lambda from `pg1.transaction`, `client.*`, and `operational.*` topics.
 - IAM roles and security groups for EC2, MSK, Lambda, and Aurora.
 
 ## Repository Layout
@@ -39,7 +39,11 @@ The Terraform configuration creates:
 ├── security.tf               # Security groups
 ├── scripts/
 │   ├── connect-kafka-mm2.sh   # macOS/Linux helper for EC2 Instance Connect SSH
-│   └── connect-kafka-mm2.bat  # Windows helper for EC2 Instance Connect SSH
+│   ├── connect-kafka-mm2.bat  # Windows helper for EC2 Instance Connect SSH
+│   └── msk/
+│       ├── msk-up.sh              # Enable MSK resources for cloud validation windows
+│       ├── msk-down.sh            # Disable MSK resources to stop MSK Serverless cost
+│       └── analyze-msk-cost-window.sh # Cost and lifecycle analysis for MSK
 ├── user_data.sh.tpl          # EC2 bootstrap script for Kafka and MirrorMaker2
 ├── variables.tf              # Input variables
 ├── local/                    # Local Docker integration stack, scripts, and component tests
@@ -154,12 +158,18 @@ The source compose lives in `local/source/docker-compose.yml`; the cloud replace
 The main variables are defined in `variables.tf`:
 
 - `aws_region`: AWS region, default `us-east-1`
+- `enable_msk`: controls MSK Serverless + Lambda MSK event mappings, default `false`
 - `project`: resource name prefix, default `kafka-mm2-msk-lab`
 - `ec2_instance_type`: EC2 host type, default `t3.large`
 - `ssh_cidr`: allowed CIDR for SSH and optional Kafka test access, default `0.0.0.0/32`
 - `ec2_instance_connect_user_name`: IAM user allowed to push temporary EC2 Instance Connect SSH keys, default `terraform`
-- `db_name`: Aurora database name, default `appdb`
+- `db_name`: legacy variable retained for backward compatibility
 - `db_username`: Aurora master username, default `appuser`
+- `client_db_name`: Aurora client database name, default `clientdb`
+- `operational_db_name`: Aurora operational database name, default `operationaldb`
+- `aurora_instance_class`: Aurora instance class, default `db.t3.medium`
+- `mm2_topic_allowlist_regex`: MM2 replication allowlist, default `(operational[.].*|client[.].*|pg1[.]transaction)`
+- `mm2_group_allowlist_regex`: MM2 group sync allowlist, default `__no_groups__`
 
 Set `ssh_cidr` to your current public IP in CIDR form before applying. Terraform also reads this automatically from the `TF_VAR_ssh_cidr` OS environment variable.
 
@@ -167,6 +177,28 @@ Set `ssh_cidr` to your current public IP in CIDR form before applying. Terraform
 export TF_VAR_ssh_cidr=<your-public-ip>/32
 terraform apply
 ```
+
+MSK is disabled by default to reduce cost. Enable it only for short validation windows:
+
+```bash
+./scripts/msk/msk-up.sh us-east-1
+```
+
+Disable MSK resources after validation:
+
+```bash
+./scripts/msk/msk-down.sh us-east-1
+```
+
+Analyze MSK cost and lifecycle events for a time window:
+
+```bash
+./scripts/msk/analyze-msk-cost-window.sh 2026-05-10 2026-05-14 us-east-1
+```
+
+Notes:
+- Exact cluster create/delete timestamps require IAM permission `cloudtrail:LookupEvents`.
+- Hour-level Cost Explorer granularity requires payer-account CE hourly opt-in; without it, charge windows are day-level.
 
 The helper scripts below set `TF_VAR_ssh_cidr` before Terraform runs. They accept the IP as an argument, or read it from `MY_IP`, `PUBLIC_IP`, or `TF_VAR_ssh_cidr`.
 
@@ -204,9 +236,11 @@ Important outputs include:
 - `ec2_private_ip`
 - `lambda_net_test_private_ip`
 - `msk_bootstrap_sasl_iam`
-- `aurora_endpoint`
+- `aurora_client_endpoint`
+- `aurora_operational_endpoint`
 - `msk_cluster_arn`
-- `aurora_master_secret_arn`
+- `aurora_client_master_secret_arn`
+- `aurora_operational_master_secret_arn`
 - `aurora_port`
 - `sg_lambda_id`
 - `sg_msk_id`
@@ -288,12 +322,12 @@ The main EC2 host uses `user_data.sh.tpl` to emulate the on-premises side of the
 - Start local PostgreSQL with logical replication enabled.
 - Register a Debezium PostgreSQL CDC connector.
 - Start local Kafka and Zookeeper.
-- Start Flink JobManager, TaskManager, and a Flink SQL projection job.
+- Start Flink JobManager, TaskManager, and a Flink SQL projection job that writes `client.*` and `operational.*` topics with source transaction metadata.
 - Start Kafka UI.
 - Write Kafka client configuration for IAM auth.
 - Write MirrorMaker2 configuration.
 - Create `/opt/lab/docker-compose.yml`.
-- Start MirrorMaker2 to replicate local topics to MSK Serverless.
+- Start MirrorMaker2 to replicate `client.*`, `operational.*`, and `pg1.transaction` to MSK Serverless.
 - Install a `lab-up.service` systemd unit for restarting the Docker stack.
 
 On the EC2 host, useful paths are:
@@ -370,20 +404,45 @@ scp -o StrictHostKeyChecking=accept-new \
 
 The Lambda handler:
 
-- Receives Kafka records from MSK.
-- Reads Aurora credentials from the RDS-managed Secrets Manager secret.
-- Connects to Aurora PostgreSQL using JDBC.
-- Creates the target table if it does not exist.
-- Stores each Kafka payload as JSONB.
+- Receives Kafka records from MSK for `pg1.transaction`, `client.*`, and `operational.*`.
+- Reads credentials from two RDS-managed Secrets Manager secrets.
+- Connects to two Aurora PostgreSQL databases (client and operational) using JDBC.
+- Upserts projection rows into destination tables with source and transaction metadata fields.
+- Stores transaction metadata from `pg1.transaction` in `cdc.transaction_metadata` on both databases.
 
 The Lambda environment variables are set by Terraform:
 
-- `DB_HOST`
-- `DB_PORT`
-- `DB_NAME`
-- `DB_USER`
-- `DB_SECRET_ARN`
-- `TABLE_NAME`
+- `CLIENT_DB_HOST`
+- `CLIENT_DB_PORT`
+- `CLIENT_DB_NAME`
+- `CLIENT_DB_USER`
+- `CLIENT_DB_SECRET_ARN`
+- `OPERATIONAL_DB_HOST`
+- `OPERATIONAL_DB_PORT`
+- `OPERATIONAL_DB_NAME`
+- `OPERATIONAL_DB_USER`
+- `OPERATIONAL_DB_SECRET_ARN`
+
+## AWS E2E Test
+
+After MSK is enabled and the EC2 host is configured with the current MSK bootstrap endpoint, run the full AWS path validation with:
+
+```bash
+./scripts/run-aws-e2e-test.sh us-east-1 ~/.ssh/temp_ec2_key
+```
+
+The script inserts a generated test customer/account/order set into the source PostgreSQL container on EC2, verifies the source Kafka topics, verifies mirrored MSK topics, then waits for Lambda to write the expected rows and CDC metadata into both Aurora databases.
+
+Optional environment overrides:
+
+```bash
+AURORA_WAIT_SECONDS=300 \
+CID=778802093 \
+AID=878802093 \
+OID=978802093 \
+EMAIL=aws-e2e-778802093@example.com \
+./scripts/run-aws-e2e-test.sh us-east-1 ~/.ssh/temp_ec2_key
+```
 
 ## Manual Lambda Test Helper
 

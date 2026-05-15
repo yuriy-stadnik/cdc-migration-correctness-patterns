@@ -3,37 +3,52 @@ resource "aws_db_subnet_group" "aurora" {
   subnet_ids = [aws_subnet.private[0].id, aws_subnet.private[1].id]
 }
 
-resource "aws_rds_cluster" "aurora" {
-  cluster_identifier = "${var.project}-aurora"
+resource "aws_rds_cluster" "aurora_client" {
+  cluster_identifier = "${var.project}-aurora-client"
 
   engine         = "aurora-postgresql"
-  engine_version = "16.8" # adjust if region differs
+  engine_version = "16.8"
 
-  database_name   = var.db_name
-  master_username = var.db_username
-
-  # AWS manages master password in Secrets Manager
+  database_name               = var.client_db_name
+  master_username             = var.db_username
   manage_master_user_password = true
-
-  db_subnet_group_name   = aws_db_subnet_group.aurora.name
-  vpc_security_group_ids = [aws_security_group.aurora.id]
-
-  # IMPORTANT: Data API OFF for provisioned Aurora
-  enable_http_endpoint = false
-
-  backup_retention_period = 1
-  skip_final_snapshot     = true
+  db_subnet_group_name        = aws_db_subnet_group.aurora.name
+  vpc_security_group_ids      = [aws_security_group.aurora.id]
+  enable_http_endpoint        = false
+  backup_retention_period     = 1
+  skip_final_snapshot         = true
 }
 
-resource "aws_rds_cluster_instance" "aurora_instance" {
-  identifier         = "${var.project}-aurora-1"
-  cluster_identifier = aws_rds_cluster.aurora.id
+resource "aws_rds_cluster_instance" "aurora_client_instance" {
+  identifier          = "${var.project}-aurora-client-1"
+  cluster_identifier  = aws_rds_cluster.aurora_client.id
+  instance_class      = var.aurora_instance_class
+  engine              = aws_rds_cluster.aurora_client.engine
+  engine_version      = aws_rds_cluster.aurora_client.engine_version
+  publicly_accessible = false
+}
 
-  # Provisioned instance class
-  instance_class = "db.t3.medium"
+resource "aws_rds_cluster" "aurora_operational" {
+  cluster_identifier = "${var.project}-aurora-operational"
 
-  engine         = aws_rds_cluster.aurora.engine
-  engine_version = aws_rds_cluster.aurora.engine_version
+  engine         = "aurora-postgresql"
+  engine_version = "16.8"
 
+  database_name               = var.operational_db_name
+  master_username             = var.db_username
+  manage_master_user_password = true
+  db_subnet_group_name        = aws_db_subnet_group.aurora.name
+  vpc_security_group_ids      = [aws_security_group.aurora.id]
+  enable_http_endpoint        = false
+  backup_retention_period     = 1
+  skip_final_snapshot         = true
+}
+
+resource "aws_rds_cluster_instance" "aurora_operational_instance" {
+  identifier          = "${var.project}-aurora-operational-1"
+  cluster_identifier  = aws_rds_cluster.aurora_operational.id
+  instance_class      = var.aurora_instance_class
+  engine              = aws_rds_cluster.aurora_operational.engine
+  engine_version      = aws_rds_cluster.aurora_operational.engine_version
   publicly_accessible = false
 }
