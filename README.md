@@ -2,6 +2,8 @@
 
 This project provisions an AWS environment that mirrors the same logical flow as the local split deployment: source CDC and transformations on EC2, replication to MSK, then fan-out writes into separate client and operational Aurora PostgreSQL databases via Lambda.
 
+This is a prototype built with an example inventory/customer/order dataset. Its main purpose is to demonstrate a real-time data flow for migrating a staging persistence layer from on-premises systems toward a service-oriented architecture. The pattern can support phased modernization workflows such as canary releases, blue/green deployments, reporting projections, audit stores, domain-specific read models, and other downstream systems that need live, consistent change streams during migration.
+
 The AWS environment uses the public EC2 instance as an on-premises infrastructure emulator. The main flow is:
 
 1. The EC2 instance runs legacy PostgreSQL, Debezium, Kafka, Flink, Kafka UI, and MirrorMaker2 in Docker.
@@ -12,6 +14,8 @@ The AWS environment uses the public EC2 instance as an on-premises infrastructur
 6. Lambda writes to two Aurora targets: client DB (`client.*`) and operational DB (`operational.*`), and stores transaction metadata (`pg1.transaction`) in both.
 
 ## Architecture
+
+![Full AWS architecture: PostgreSQL CDC, Debezium, Kafka, Flink, MirrorMaker2, MSK Serverless, Lambda, and Aurora PostgreSQL](charts/Flow.png)
 
 The Terraform configuration creates:
 
@@ -25,12 +29,28 @@ The Terraform configuration creates:
 - MSK event source mappings that invoke Lambda from `pg1.transaction`, `client.*`, and `operational.*` topics.
 - IAM roles and security groups for EC2, MSK, Lambda, and Aurora.
 
+The diagram shows the EC2 host as the source-side infrastructure emulator. It runs the legacy PostgreSQL database, Debezium CDC, local Kafka, Flink SQL transformations, Kafka UI, and MirrorMaker2 containers. AWS keeps the managed target side private: MSK Serverless, Lambda, and both Aurora PostgreSQL clusters run inside the VPC path, with Secrets Manager providing database credentials.
+
+## Permissions, Topics, and Idempotency
+
+![Access matrix, topic routing, idempotent write strategy, and source metadata support](charts/PermissionTopics.png)
+
+The pipeline is split by topic prefix:
+
+- `client.*` topics are routed to the client Aurora database.
+- `operational.*` topics are routed to the operational Aurora database.
+- `pg1.transaction` is written to `cdc.transaction_metadata` in both destination databases.
+
+Every derived business topic keeps source metadata from the Debezium event stream: `source_record_type`, `source_ts_ms`, `source_tx_id`, `source_tx_total_order`, and `source_tx_data_collection_order`. Lambda uses topic prefix routing and business keys to upsert or delete destination rows idempotently while preserving the transaction metadata needed for replay, audit, and consistency checks.
+
 ## Repository Layout
 
 ```text
 .
 ├── aurora.tf                 # Aurora PostgreSQL cluster and instance
+├── charts/                   # Architecture, local flow, permissions, and topic diagrams
 ├── ec2.tf                    # EC2 hosts, IAM role, and user data wiring
+├── iam-terraform-deployer-user.yaml # Optional IAM bootstrap stack for Terraform user setup
 ├── lambda.tf                 # Java Lambda function and MSK event source mapping
 ├── msk.tf                    # MSK Serverless cluster
 ├── network.tf                # VPC, subnets, routes, NAT, and Internet Gateway
@@ -62,8 +82,10 @@ The Terraform configuration creates:
 - Terraform `>= 1.5.0`
 - AWS CLI configured with credentials for the target account
 - Java 17
+- Docker and Docker Compose v2 for local validation
+- `jq` for the AWS E2E script
 - Network access to AWS APIs
-- Permissions to create VPC, EC2, MSK, RDS, Lambda, IAM, Secrets Manager, and related resources
+- Permissions to create VPC, EC2, MSK, RDS, Lambda, IAM, Secrets Manager, CloudWatch Logs, S3, KMS decrypt grants, and related resources
 
 This project creates billable AWS resources, including NAT Gateway, EC2, MSK Serverless, Aurora, Lambda, and data transfer.
 
@@ -88,6 +110,8 @@ docker compose -f local/docker-compose.yml up -d
 The stack packages the local CDC components directly in this repository: one-shot PostgreSQL init, one-shot Debezium connector registration, Flink connector JAR mounting, Kafka UI, and a basic Flink SQL projection into target PostgreSQL. See `local/README.md` for topic checks, source-change commands, and cleanup steps.
 
 ## Local Two-Compose Migration Emulation
+
+![Local Docker Compose deployment: source CDC stack, cloud emulator stack, MirrorMaker2, Lambda emulator, and PostgreSQL targets](charts/LocalFlow.png)
 
 For local development without MSK, Lambda, or Aurora, Terraform can start a split Docker deployment:
 
@@ -153,6 +177,47 @@ Run all component checks:
 
 The source compose lives in `local/source/docker-compose.yml`; the cloud replacement compose lives in `local/cloud/docker-compose.yml`. See `local/README.md` for verification commands.
 
+## AWS Account Preparation
+
+Use a dedicated AWS account or sandbox account when possible. At minimum, prepare these items before running Terraform:
+
+1. Choose an AWS region. The default is `us-east-1`.
+2. Confirm the AWS CLI identity that will run Terraform:
+
+```bash
+aws sts get-caller-identity
+```
+
+3. Bootstrap a deployer IAM user or role with permissions for this project. This repository includes `iam-terraform-deployer-user.yaml`, a CloudFormation template that creates a scoped IAM user named `terraform` by default and attaches permissions for the VPC, EC2, MSK, RDS/Aurora, Lambda, IAM roles, Secrets Manager, CloudWatch, Cost Explorer, CloudTrail lookup, and EC2 Instance Connect actions used by the project.
+
+```bash
+aws cloudformation deploy \
+  --region us-east-1 \
+  --stack-name kafka-mm2-msk-lab-terraform-user \
+  --template-file iam-terraform-deployer-user.yaml \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --parameter-overrides \
+    TerraformUserName=terraform \
+    ProjectPrefix=kafka-mm2-msk-lab \
+    CreateAccessKey=false
+```
+
+4. Configure AWS CLI credentials for the selected deployer identity. Prefer IAM Identity Center, role assumption, or manually managed short-lived credentials. If you intentionally need CloudFormation to create an access key for a disposable lab account, set `CreateAccessKey=true` and store the returned secret securely.
+5. Make sure required service-linked roles can be created on first use. The bootstrap policy allows service-linked role creation for Auto Scaling, MSK, Lambda, and RDS.
+6. Set your public IP as the SSH allowlist before applying EC2 resources:
+
+```bash
+export TF_VAR_ssh_cidr=<your-public-ip>/32
+```
+
+You can detect your current public IP with:
+
+```bash
+curl -fsS https://checkip.amazonaws.com
+```
+
+The helper scripts can also detect or accept your public IP and set `TF_VAR_ssh_cidr` automatically.
+
 ## Configuration
 
 The main variables are defined in `variables.tf`:
@@ -161,6 +226,8 @@ The main variables are defined in `variables.tf`:
 - `enable_msk`: controls MSK Serverless + Lambda MSK event mappings, default `false`
 - `project`: resource name prefix, default `kafka-mm2-msk-lab`
 - `ec2_instance_type`: EC2 host type, default `t3.large`
+- `ec2_root_volume_size`: root EBS volume size for the EC2 source emulator, default `80`
+- `ec2_msk_bootstrap_iam`: optional MSK IAM bootstrap string for MirrorMaker2 on EC2
 - `ssh_cidr`: allowed CIDR for SSH and optional Kafka test access, default `0.0.0.0/32`
 - `ec2_instance_connect_user_name`: IAM user allowed to push temporary EC2 Instance Connect SSH keys, default `terraform`
 - `db_name`: legacy variable retained for backward compatibility
@@ -170,6 +237,8 @@ The main variables are defined in `variables.tf`:
 - `aurora_instance_class`: Aurora instance class, default `db.t3.medium`
 - `mm2_topic_allowlist_regex`: MM2 replication allowlist, default `(operational[.].*|client[.].*|pg1[.]transaction)`
 - `mm2_group_allowlist_regex`: MM2 group sync allowlist, default `__no_groups__`
+- `enable_local_deployment`: starts the local two-compose Docker deployment, default `false`
+- `local_docker_network_name`: shared Docker network for local source and cloud emulator stacks, default `cdc-migration-local`
 
 Set `ssh_cidr` to your current public IP in CIDR form before applying. Terraform also reads this automatically from the `TF_VAR_ssh_cidr` OS environment variable.
 

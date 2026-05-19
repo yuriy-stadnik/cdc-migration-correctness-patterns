@@ -1,0 +1,260 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Creates an IAM user for running the Terraform flow in this repository.
+  Run this stack once with an administrator or IAM bootstrap role, then use the
+  created user credentials for terraform init/plan/apply/destroy.
+
+Parameters:
+  TerraformUserName:
+    Type: String
+    Default: terraform
+    Description: IAM user that will run Terraform and EC2 Instance Connect helpers.
+
+  ProjectPrefix:
+    Type: String
+    Default: kafka-mm2-msk-lab
+    Description: Must match Terraform variable "project".
+
+  CreateAccessKey:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: >
+      Optionally create an access key for the IAM user. Prefer IAM Identity Center,
+      role assumption, or manually rotated keys when possible.
+
+Conditions:
+  ShouldCreateAccessKey: !Equals [!Ref CreateAccessKey, "true"]
+
+Resources:
+  TerraformUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: !Ref TerraformUserName
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectPrefix
+        - Key: Purpose
+          Value: TerraformDeployer
+
+  TerraformAccessKey:
+    Type: AWS::IAM::AccessKey
+    Condition: ShouldCreateAccessKey
+    Properties:
+      UserName: !Ref TerraformUser
+
+  TerraformPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${ProjectPrefix}-terraform-deployer"
+      Description: !Sub "Permissions for ${TerraformUserName} to deploy ${ProjectPrefix} Terraform resources."
+      Users:
+        - !Ref TerraformUser
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: IdentityAndDiscovery
+            Effect: Allow
+            Action:
+              - sts:GetCallerIdentity
+              - ec2:Describe*
+              - rds:Describe*
+              - rds:ListTagsForResource
+              - lambda:Get*
+              - lambda:List*
+              - kafka:List*
+              - kafka:Describe*
+              - kafka:GetBootstrapBrokers
+              - iam:Get*
+              - iam:List*
+              - logs:Describe*
+              - secretsmanager:DescribeSecret
+              - secretsmanager:ListSecretVersionIds
+              - kms:DescribeKey
+            Resource: "*"
+
+          - Sid: NetworkAndComputeDeployment
+            Effect: Allow
+            Action:
+              - ec2:CreateVpc
+              - ec2:DeleteVpc
+              - ec2:ModifyVpcAttribute
+              - ec2:CreateSubnet
+              - ec2:DeleteSubnet
+              - ec2:ModifySubnetAttribute
+              - ec2:CreateInternetGateway
+              - ec2:AttachInternetGateway
+              - ec2:DetachInternetGateway
+              - ec2:DeleteInternetGateway
+              - ec2:CreateRouteTable
+              - ec2:DeleteRouteTable
+              - ec2:CreateRoute
+              - ec2:DeleteRoute
+              - ec2:AssociateRouteTable
+              - ec2:DisassociateRouteTable
+              - ec2:AllocateAddress
+              - ec2:ReleaseAddress
+              - ec2:CreateNatGateway
+              - ec2:DeleteNatGateway
+              - ec2:CreateSecurityGroup
+              - ec2:DeleteSecurityGroup
+              - ec2:AuthorizeSecurityGroupIngress
+              - ec2:RevokeSecurityGroupIngress
+              - ec2:AuthorizeSecurityGroupEgress
+              - ec2:RevokeSecurityGroupEgress
+              - ec2:RunInstances
+              - ec2:TerminateInstances
+              - ec2:StartInstances
+              - ec2:StopInstances
+              - ec2:CreateTags
+              - ec2:DeleteTags
+            Resource: "*"
+
+          - Sid: RdsDeployment
+            Effect: Allow
+            Action:
+              - rds:CreateDBSubnetGroup
+              - rds:DeleteDBSubnetGroup
+              - rds:ModifyDBSubnetGroup
+              - rds:CreateDBCluster
+              - rds:ModifyDBCluster
+              - rds:DeleteDBCluster
+              - rds:CreateDBInstance
+              - rds:ModifyDBInstance
+              - rds:DeleteDBInstance
+              - rds:AddTagsToResource
+              - rds:RemoveTagsFromResource
+            Resource:
+              - !Sub "arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:cluster:${ProjectPrefix}-*"
+              - !Sub "arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:db:${ProjectPrefix}-*"
+              - !Sub "arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:subgrp:${ProjectPrefix}-*"
+
+          - Sid: MskDeployment
+            Effect: Allow
+            Action:
+              - kafka:CreateClusterV2
+              - kafka:DeleteCluster
+              - kafka:TagResource
+              - kafka:UntagResource
+            Resource: "*"
+
+          - Sid: LambdaDeployment
+            Effect: Allow
+            Action:
+              - lambda:CreateFunction
+              - lambda:UpdateFunctionCode
+              - lambda:UpdateFunctionConfiguration
+              - lambda:DeleteFunction
+              - lambda:CreateEventSourceMapping
+              - lambda:UpdateEventSourceMapping
+              - lambda:DeleteEventSourceMapping
+              - lambda:TagResource
+              - lambda:UntagResource
+            Resource:
+              - !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${ProjectPrefix}-*"
+              - "*"
+
+          - Sid: IamDeploymentForProjectRoles
+            Effect: Allow
+            Action:
+              - iam:CreateRole
+              - iam:DeleteRole
+              - iam:UpdateAssumeRolePolicy
+              - iam:PutRolePolicy
+              - iam:DeleteRolePolicy
+              - iam:AttachRolePolicy
+              - iam:DetachRolePolicy
+              - iam:CreateInstanceProfile
+              - iam:DeleteInstanceProfile
+              - iam:AddRoleToInstanceProfile
+              - iam:RemoveRoleFromInstanceProfile
+            Resource:
+              - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectPrefix}-*"
+              - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:instance-profile/${ProjectPrefix}-*"
+
+          - Sid: CreateServiceLinkedRolesForFirstUse
+            Effect: Allow
+            Action:
+              - iam:CreateServiceLinkedRole
+            Resource: "*"
+            Condition:
+              StringEquals:
+                iam:AWSServiceName:
+                  - autoscaling.amazonaws.com
+                  - kafka.amazonaws.com
+                  - lambda.amazonaws.com
+                  - rds.amazonaws.com
+
+          - Sid: PassProjectRolesToComputeServices
+            Effect: Allow
+            Action:
+              - iam:PassRole
+            Resource:
+              - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectPrefix}-*"
+            Condition:
+              StringEquals:
+                iam:PassedToService:
+                  - ec2.amazonaws.com
+                  - lambda.amazonaws.com
+
+          - Sid: AttachAwsManagedRuntimePolicies
+            Effect: Allow
+            Action:
+              - iam:AttachRolePolicy
+              - iam:DetachRolePolicy
+            Resource:
+              - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectPrefix}-*"
+            Condition:
+              ArnEquals:
+                iam:PolicyARN:
+                  - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+                  - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+                  - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+                  - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaMSKExecutionRole"
+
+          - Sid: Ec2InstanceConnectUserPolicyManagedByTerraform
+            Effect: Allow
+            Action:
+              - iam:PutUserPolicy
+              - iam:GetUserPolicy
+              - iam:DeleteUserPolicy
+            Resource:
+              - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:user/${TerraformUserName}"
+
+          - Sid: RuntimeSecretReadForTests
+            Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+              - kms:Decrypt
+            Resource: "*"
+
+          - Sid: OperatorTestAndCostAnalysis
+            Effect: Allow
+            Action:
+              - ec2-instance-connect:SendSSHPublicKey
+              - ce:GetCostAndUsage
+              - cloudtrail:LookupEvents
+            Resource: "*"
+
+Outputs:
+  TerraformUserName:
+    Description: IAM user for this Terraform flow.
+    Value: !Ref TerraformUser
+
+  TerraformPolicyArn:
+    Description: Managed policy attached to the Terraform user.
+    Value: !Ref TerraformPolicy
+
+  AccessKeyId:
+    Condition: ShouldCreateAccessKey
+    Description: Access key id, only when CreateAccessKey=true.
+    Value: !Ref TerraformAccessKey
+
+  SecretAccessKey:
+    Condition: ShouldCreateAccessKey
+    Description: >
+      Secret access key. Retrieve once from stack outputs and store securely.
+      Rotating or deleting this key later is recommended.
+    Value: !GetAtt TerraformAccessKey.SecretAccessKey

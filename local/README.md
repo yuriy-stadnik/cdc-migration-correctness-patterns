@@ -184,6 +184,8 @@ Not implemented yet:
 
 ## Two-Compose Local Migration Deployment
 
+![Local Docker Compose deployment: source CDC stack, cloud emulator stack, MirrorMaker2, Lambda emulator, and PostgreSQL targets](../charts/LocalFlow.png)
+
 The split local deployment replaces the AWS side with local containers while keeping the same migration shape:
 
 ```text
