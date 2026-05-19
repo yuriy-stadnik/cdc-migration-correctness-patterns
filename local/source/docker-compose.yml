@@ -1,0 +1,247 @@
+networks:
+  cdc-migration-local:
+    external: true
+    name: cdc-migration-local
+
+volumes:
+  source-postgres-data: {}
+  source-zookeeper-data: {}
+  source-zookeeper-log: {}
+  source-kafka-data: {}
+
+services:
+  source-zookeeper:
+    image: confluentinc/cp-zookeeper:7.7.7
+    hostname: source-zookeeper
+    container_name: local-source-zookeeper
+    networks: [cdc-migration-local]
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: "2181"
+      ZOOKEEPER_TICK_TIME: "2000"
+    volumes:
+      - source-zookeeper-data:/var/lib/zookeeper/data
+      - source-zookeeper-log:/var/lib/zookeeper/log
+
+  source-kafka:
+    image: confluentinc/cp-kafka:7.7.7
+    hostname: source-kafka
+    container_name: local-source-kafka
+    networks: [cdc-migration-local]
+    depends_on:
+      - source-zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: "11"
+      KAFKA_ZOOKEEPER_CONNECT: "source-zookeeper:2181"
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://source-kafka:29092,PLAINTEXT_HOST://localhost:9092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    volumes:
+      - source-kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server source-kafka:29092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+
+  source-postgres:
+    image: postgres:16-alpine
+    hostname: source-postgres
+    container_name: local-source-postgres
+    networks: [cdc-migration-local]
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: appdb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
+      - -c
+      - wal_keep_size=256MB
+    volumes:
+      - source-postgres-data:/var/lib/postgresql/data
+      - ../postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d appdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  source-connect:
+    image: debezium/connect:2.7.3.Final
+    hostname: source-connect
+    container_name: local-source-debezium-connect
+    networks: [cdc-migration-local]
+    depends_on:
+      source-kafka:
+        condition: service_healthy
+      source-postgres:
+        condition: service_healthy
+    ports:
+      - "8083:8083"
+    environment:
+      BOOTSTRAP_SERVERS: "source-kafka:29092"
+      GROUP_ID: "local-source-connect-cluster"
+      CONFIG_STORAGE_TOPIC: "source_connect_configs"
+      OFFSET_STORAGE_TOPIC: "source_connect_offsets"
+      STATUS_STORAGE_TOPIC: "source_connect_status"
+      CONFIG_STORAGE_REPLICATION_FACTOR: "1"
+      OFFSET_STORAGE_REPLICATION_FACTOR: "1"
+      STATUS_STORAGE_REPLICATION_FACTOR: "1"
+      CONNECT_CONFIG_STORAGE_PARTITIONS: "1"
+      CONNECT_OFFSET_STORAGE_PARTITIONS: "1"
+      CONNECT_STATUS_STORAGE_PARTITIONS: "1"
+      KEY_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+      VALUE_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+      KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      REST_HOST_NAME: "0.0.0.0"
+      REST_ADVERTISED_HOST_NAME: "source-connect"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8083/connectors >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  source-dbz-init:
+    image: curlimages/curl:8.7.1
+    container_name: local-source-dbz-init
+    networks: [cdc-migration-local]
+    depends_on:
+      source-connect:
+        condition: service_healthy
+    restart: "no"
+    volumes:
+      - ./connectors:/connectors:ro
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        echo "Registering/updating Debezium connector..."
+        status=$$(curl -sS -o /tmp/connect-response.txt -w "%{http_code}" \
+          -X PUT \
+          -H "Content-Type: application/json" \
+          --data @/connectors/legacy-postgres-source-config.json \
+          http://source-connect:8083/connectors/legacy-postgres-source/config)
+        cat /tmp/connect-response.txt
+        echo
+        if [ "$$status" -lt 200 ] || [ "$$status" -ge 300 ]; then
+          echo "Connector registration failed with HTTP $$status" >&2
+          exit 1
+        fi
+        curl -sS http://source-connect:8083/connectors/legacy-postgres-source/status
+        echo
+
+  source-flink-jobmanager:
+    image: flink:1.19.1-scala_2.12-java17
+    hostname: source-flink-jobmanager
+    container_name: local-source-flink-jobmanager
+    networks: [cdc-migration-local]
+    ports:
+      - "8081:8081"
+    command: >
+      bash -lc "cp -n /opt/flink/usrlib/plugins/kafka/*.jar /opt/flink/lib/ 2>/dev/null || true;
+                exec /docker-entrypoint.sh jobmanager"
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: source-flink-jobmanager
+        taskmanager.numberOfTaskSlots: 16
+        parallelism.default: 1
+        state.backend.type: hashmap
+        execution.checkpointing.interval: 10s
+    volumes:
+      - ./flink/sql/init.sql:/opt/flink/init.sql:ro
+      - ../flink-usrlib/plugins:/opt/flink/plugins:ro
+      - ../flink-usrlib:/opt/flink/usrlib:ro
+
+  source-flink-taskmanager:
+    image: flink:1.19.1-scala_2.12-java17
+    hostname: source-flink-taskmanager
+    container_name: local-source-flink-taskmanager
+    networks: [cdc-migration-local]
+    depends_on:
+      - source-flink-jobmanager
+    command: >
+      bash -lc "cp -n /opt/flink/usrlib/plugins/kafka/*.jar /opt/flink/lib/ 2>/dev/null || true;
+                exec /docker-entrypoint.sh taskmanager"
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: source-flink-jobmanager
+        taskmanager.numberOfTaskSlots: 16
+        parallelism.default: 1
+        state.backend.type: hashmap
+        execution.checkpointing.interval: 10s
+    volumes:
+      - ../flink-usrlib/plugins:/opt/flink/plugins:ro
+      - ../flink-usrlib:/opt/flink/usrlib:ro
+
+  source-flink-sql-init:
+    image: flink:1.19.1-scala_2.12-java17
+    container_name: local-source-flink-sql-init
+    networks: [cdc-migration-local]
+    depends_on:
+      source-dbz-init:
+        condition: service_completed_successfully
+      source-flink-jobmanager:
+        condition: service_started
+      source-flink-taskmanager:
+        condition: service_started
+    restart: "no"
+    volumes:
+      - ./flink/sql/init.sql:/opt/flink/init.sql:ro
+      - ../flink-usrlib/plugins:/opt/flink/plugins:ro
+      - ../flink-usrlib:/opt/flink/usrlib:ro
+    command: >
+      bash -lc "
+        set -e;
+        until (echo > /dev/tcp/source-flink-jobmanager/8081) >/dev/null 2>&1; do sleep 1; done;
+        cp -n /opt/flink/usrlib/plugins/kafka/*.jar /opt/flink/lib/ 2>/dev/null || true;
+        cp -n /opt/flink/usrlib/*.jar /opt/flink/lib/ 2>/dev/null || true;
+        /opt/flink/bin/sql-client.sh -f /opt/flink/init.sql -Drest.address=source-flink-jobmanager -Drest.port=8081;
+      "
+
+  source-mirrormaker2:
+    image: confluentinc/cp-kafka-connect:7.8.0
+    container_name: local-source-mirrormaker2
+    networks: [cdc-migration-local]
+    depends_on:
+      source-kafka:
+        condition: service_healthy
+      source-dbz-init:
+        condition: service_completed_successfully
+      source-flink-sql-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./mm2.properties:/etc/kafka/mm2.properties:ro
+    command: >
+      bash -lc "connect-mirror-maker /etc/kafka/mm2.properties"
+    restart: unless-stopped
+
+  source-kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: local-source-kafka-ui
+    networks: [cdc-migration-local]
+    depends_on:
+      source-kafka:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: "source-emulator"
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: "source-kafka:29092"
+      KAFKA_CLUSTERS_0_ZOOKEEPER: "source-zookeeper:2181"

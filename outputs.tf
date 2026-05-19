@@ -33,22 +33,41 @@ output "lambda_net_test_private_ip" {
 }
 
 data "aws_msk_bootstrap_brokers" "this" {
-  cluster_arn = aws_msk_serverless_cluster.this.arn
+  count       = var.enable_msk ? 1 : 0
+  cluster_arn = aws_msk_serverless_cluster.this[0].arn
 }
 
 output "msk_bootstrap_sasl_iam" {
-  value = data.aws_msk_bootstrap_brokers.this.bootstrap_brokers_sasl_iam
+  value = try(data.aws_msk_bootstrap_brokers.this[0].bootstrap_brokers_sasl_iam, null)
+}
+
+output "aurora_client_endpoint" {
+  value = aws_rds_cluster.aurora_client.endpoint
+}
+
+output "aurora_operational_endpoint" {
+  value = aws_rds_cluster.aurora_operational.endpoint
 }
 
 output "aurora_endpoint" {
-  value = aws_rds_cluster.aurora.endpoint
+  description = "Backward-compatible alias for operational Aurora endpoint."
+  value       = aws_rds_cluster.aurora_operational.endpoint
 }
 
 output "msk_cluster_arn" {
-  value = aws_msk_serverless_cluster.this.arn
+  value = try(aws_msk_serverless_cluster.this[0].arn, null)
 }
+output "aurora_client_master_secret_arn" {
+  value = try(aws_rds_cluster.aurora_client.master_user_secret[0].secret_arn, null)
+}
+
+output "aurora_operational_master_secret_arn" {
+  value = try(aws_rds_cluster.aurora_operational.master_user_secret[0].secret_arn, null)
+}
+
 output "aurora_master_secret_arn" {
-  value = try(aws_rds_cluster.aurora.master_user_secret[0].secret_arn, null)
+  description = "Backward-compatible alias for operational Aurora secret ARN."
+  value       = try(aws_rds_cluster.aurora_operational.master_user_secret[0].secret_arn, null)
 }
 
 output "aurora_port" {

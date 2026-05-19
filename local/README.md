@@ -1,6 +1,6 @@
 # Local Integration Stack
 
-This directory integrates the local `/Users/yuriy/work/PipeLine` CDC/Flink stack into the current AWS migration project.
+This directory contains the local CDC/Flink stack used by the current migration project.
 
 It validates the first part of the target architecture before using AWS:
 
@@ -12,7 +12,7 @@ local legacy PostgreSQL
   -> local target PostgreSQL
 ```
 
-## Included From PipeLine
+## Included Components
 
 - PostgreSQL source with logical decoding settings.
 - One-shot PostgreSQL initializer.
@@ -181,3 +181,127 @@ Not implemented yet:
 - Automated test assertions.
 - MirrorMaker2 to AWS MSK from the local stack.
 - Source LSN and transaction ID extraction into target projection.
+
+## Two-Compose Local Migration Deployment
+
+![Local Docker Compose deployment: source CDC stack, cloud emulator stack, MirrorMaker2, Lambda emulator, and PostgreSQL targets](../charts/LocalFlow.png)
+
+The split local deployment replaces the AWS side with local containers while keeping the same migration shape:
+
+```text
+source compose:
+  source PostgreSQL -> Debezium CDC -> source Kafka -> Flink -> client.* and operational.* topics -> MirrorMaker2
+
+cloud replacement compose:
+  cloud Kafka -> local Lambda replacement -> client PostgreSQL + operational PostgreSQL
+```
+
+The split flow also carries Debezium transaction metadata:
+
+- `pg1.transaction` is replicated to the cloud replacement Kafka.
+- Each derived data topic includes `source_record_type`, `source_ts_ms`, `source_tx_id`, `source_tx_total_order`, and `source_tx_data_collection_order`.
+- Each destination business table stores those same source metadata columns.
+- `cdc.transaction_metadata` stores transaction `BEGIN` and `END` rows with `event_count`, `data_collections`, and `ts_ms` for consistency checks and orchestration.
+
+Files:
+
+- `local/source/docker-compose.yml`: source/on-prem emulator with PostgreSQL, Debezium, Kafka, Flink, and MirrorMaker2.
+- `local/cloud/docker-compose.yml`: cloud replacement with Kafka, a Lambda-like consumer, client PostgreSQL, and operational PostgreSQL.
+- `local/source/mm2.properties`: MirrorMaker2 replication from `source-kafka:29092` to `cloud-kafka:39092`.
+- `local/cloud/lambda-consumer/src/main/java/com/example/local/LocalLambdaConsumer.java`: consumes `client.*` and `operational.*` topics and upserts into the matching destination database.
+
+Start with Terraform:
+
+```bash
+terraform apply \
+  -var enable_local_deployment=true \
+  -target=terraform_data.local_docker_network \
+  -target=terraform_data.local_cloud_deployment \
+  -target=terraform_data.local_source_deployment
+```
+
+Or start directly with Docker Compose:
+
+```bash
+docker network inspect cdc-migration-local >/dev/null 2>&1 || docker network create cdc-migration-local
+docker compose -f local/cloud/docker-compose.yml up -d --build
+docker compose -f local/source/docker-compose.yml up -d
+```
+
+Or use the local deployment helper:
+
+```bash
+./local/scripts/start-local.sh
+```
+
+Run the local delivery test:
+
+```bash
+./local/scripts/run-local-e2e.sh
+```
+
+Reset both local compose stacks and run from a blank slate:
+
+```bash
+RESET=1 ./local/scripts/run-local-e2e.sh
+```
+
+Run component checks separately after the local stack is up:
+
+```bash
+./local/tests/test-source-postgres.sh
+./local/tests/test-debezium-connect.sh
+./local/tests/test-source-kafka.sh
+./local/tests/test-flink.sh
+./local/tests/test-mirrormaker2.sh
+./local/tests/test-cloud-kafka.sh
+./local/tests/test-client-postgres.sh
+./local/tests/test-operational-postgres.sh
+./local/tests/test-local-lambda.sh
+```
+
+Run every component check:
+
+```bash
+./local/tests/run-all-components.sh
+```
+
+Verify cloud replacement Kafka topics:
+
+```bash
+docker exec -it local-cloud-kafka kafka-topics \
+  --bootstrap-server cloud-kafka:39092 \
+  --list
+```
+
+Verify client PostgreSQL:
+
+```bash
+docker exec -it local-cloud-client-postgres psql -U appuser -d clientdb \
+  -c "SELECT 'customers' AS table_name, count(*) FROM client.customers
+      UNION ALL SELECT 'addresses', count(*) FROM client.addresses
+      ORDER BY table_name;"
+```
+
+Verify operational PostgreSQL:
+
+```bash
+docker exec -it local-cloud-operational-postgres psql -U appuser -d operationaldb \
+  -c "SELECT 'products' AS table_name, count(*) FROM operational.products
+      UNION ALL SELECT 'orders', count(*) FROM operational.orders
+      UNION ALL SELECT 'order_items', count(*) FROM operational.order_items
+      UNION ALL SELECT 'contact_numbers', count(*) FROM operational.contact_numbers
+      ORDER BY table_name;"
+```
+
+Stop the split local deployment:
+
+```bash
+./local/scripts/stop-local.sh
+```
+
+Delete split local volumes:
+
+```bash
+DELETE_VOLUMES=1 ./local/scripts/stop-local.sh
+```

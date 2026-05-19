@@ -1,0 +1,30 @@
+plugins {
+    id 'java'
+    id 'com.github.johnrengelman.shadow' version '8.1.1'
+}
+
+group = 'com.example.local'
+version = '1.0.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+}
+
+dependencies {
+    implementation 'org.apache.kafka:kafka-clients:3.7.2'
+    implementation 'org.postgresql:postgresql:42.7.4'
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.17.2'
+    implementation 'org.slf4j:slf4j-simple:2.0.13'
+}
+
+tasks.jar {
+    manifest {
+        attributes 'Main-Class': 'com.example.local.LocalLambdaConsumer'
+    }
+}
+
+tasks.shadowJar {
+    archiveFileName.set('local-lambda-consumer-all.jar')
+}

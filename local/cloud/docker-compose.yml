@@ -1,0 +1,137 @@
+networks:
+  cdc-migration-local:
+    external: true
+    name: cdc-migration-local
+
+volumes:
+  cloud-zookeeper-data: {}
+  cloud-zookeeper-log: {}
+  cloud-kafka-data: {}
+  cloud-client-postgres-data: {}
+  cloud-operational-postgres-data: {}
+
+services:
+  cloud-zookeeper:
+    image: confluentinc/cp-zookeeper:7.7.7
+    hostname: cloud-zookeeper
+    container_name: local-cloud-zookeeper
+    networks: [cdc-migration-local]
+    ports:
+      - "22181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: "2181"
+      ZOOKEEPER_TICK_TIME: "2000"
+    volumes:
+      - cloud-zookeeper-data:/var/lib/zookeeper/data
+      - cloud-zookeeper-log:/var/lib/zookeeper/log
+
+  cloud-kafka:
+    image: confluentinc/cp-kafka:7.7.7
+    hostname: cloud-kafka
+    container_name: local-cloud-kafka
+    networks: [cdc-migration-local]
+    depends_on:
+      - cloud-zookeeper
+    ports:
+      - "19092:19092"
+    environment:
+      KAFKA_BROKER_ID: "21"
+      KAFKA_ZOOKEEPER_CONNECT: "cloud-zookeeper:2181"
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:39092,PLAINTEXT_HOST://0.0.0.0:19092"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://cloud-kafka:39092,PLAINTEXT_HOST://localhost:19092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    volumes:
+      - cloud-kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server cloud-kafka:39092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+
+  cloud-client-postgres:
+    image: postgres:16-alpine
+    hostname: cloud-client-postgres
+    container_name: local-cloud-client-postgres
+    networks: [cdc-migration-local]
+    ports:
+      - "5434:5432"
+    environment:
+      POSTGRES_DB: clientdb
+      POSTGRES_USER: appuser
+      POSTGRES_PASSWORD: apppass
+    volumes:
+      - cloud-client-postgres-data:/var/lib/postgresql/data
+      - ./postgres/client-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U appuser -d clientdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  cloud-operational-postgres:
+    image: postgres:16-alpine
+    hostname: cloud-operational-postgres
+    container_name: local-cloud-operational-postgres
+    networks: [cdc-migration-local]
+    ports:
+      - "5435:5432"
+    environment:
+      POSTGRES_DB: operationaldb
+      POSTGRES_USER: appuser
+      POSTGRES_PASSWORD: apppass
+    volumes:
+      - cloud-operational-postgres-data:/var/lib/postgresql/data
+      - ./postgres/operational-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U appuser -d operationaldb"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  local-lambda:
+    build:
+      context: ./lambda-consumer
+    container_name: local-cloud-lambda
+    networks: [cdc-migration-local]
+    depends_on:
+      cloud-kafka:
+        condition: service_healthy
+      cloud-client-postgres:
+        condition: service_healthy
+      cloud-operational-postgres:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: "cloud-kafka:39092"
+      KAFKA_GROUP_ID: "local-lambda-to-postgres"
+      KAFKA_TOPICS: "pg1.transaction,client.customers,client.addresses,operational.products,operational.orders,operational.order_items,operational.contact_numbers"
+      CLIENT_DB_HOST: "cloud-client-postgres"
+      CLIENT_DB_PORT: "5432"
+      CLIENT_DB_NAME: "clientdb"
+      CLIENT_DB_USER: "appuser"
+      CLIENT_DB_PASSWORD: "apppass"
+      OPERATIONAL_DB_HOST: "cloud-operational-postgres"
+      OPERATIONAL_DB_PORT: "5432"
+      OPERATIONAL_DB_NAME: "operationaldb"
+      OPERATIONAL_DB_USER: "appuser"
+      OPERATIONAL_DB_PASSWORD: "apppass"
+    restart: unless-stopped
+
+  cloud-kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: local-cloud-kafka-ui
+    networks: [cdc-migration-local]
+    depends_on:
+      cloud-kafka:
+        condition: service_healthy
+    ports:
+      - "18080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: "cloud-emulator"
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: "cloud-kafka:39092"
+      KAFKA_CLUSTERS_0_ZOOKEEPER: "cloud-zookeeper:2181"
