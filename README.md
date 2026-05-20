@@ -1,4 +1,4 @@
-# Kafka MirrorMaker2 to MSK to Aurora
+# Kafka CDC Replication to MSK and Aurora
 
 This project provisions an AWS environment that mirrors the same logical flow as the local split deployment: source CDC and transformations on EC2, replication to MSK, then fan-out writes into separate client and operational Aurora PostgreSQL databases via Lambda.
 
