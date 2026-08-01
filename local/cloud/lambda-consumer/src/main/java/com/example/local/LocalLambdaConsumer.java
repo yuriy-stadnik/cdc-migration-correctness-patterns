@@ -249,7 +249,7 @@ public class LocalLambdaConsumer {
         }
     }
 
-    private void upsert(Connection clientConn, Connection operationalConn, String topic, int partition, long offset, Map<String, Object> payload) throws Exception {
+    static void upsert(Connection clientConn, Connection operationalConn, String topic, int partition, long offset, Map<String, Object> payload) throws Exception {
         switch (topic) {
             case "pg1.transaction" -> {
                 upsertTransactionMetadata(clientConn, payload);
@@ -268,7 +268,7 @@ public class LocalLambdaConsumer {
         }
     }
 
-    private void upsertCustomer(Connection conn, Map<String, Object> payload) throws Exception {
+    static void upsertCustomer(Connection conn, Map<String, Object> payload) throws Exception {
         try (PreparedStatement ps = conn.prepareStatement("""
                 INSERT INTO client.customers (
                     id, first_name, last_name, email, status, created_at, updated_at,
@@ -301,7 +301,7 @@ public class LocalLambdaConsumer {
         }
     }
 
-    private void upsertProduct(Connection conn, Map<String, Object> payload) throws Exception {
+    static void upsertProduct(Connection conn, Map<String, Object> payload) throws Exception {
         try (PreparedStatement ps = conn.prepareStatement("""
                 INSERT INTO operational.products (
                     name, category, current_price, source_record_type, source_ts_ms, source_tx_id,
@@ -325,7 +325,7 @@ public class LocalLambdaConsumer {
         }
     }
 
-    private void upsertOrder(Connection conn, Map<String, Object> payload) throws Exception {
+    static void upsertOrder(Connection conn, Map<String, Object> payload) throws Exception {
         try (PreparedStatement ps = conn.prepareStatement("""
                 INSERT INTO operational.orders (
                     id, customer_id, order_date, status, source_record_type, source_ts_ms,
@@ -351,7 +351,7 @@ public class LocalLambdaConsumer {
         }
     }
 
-    private void upsertOrderItem(Connection conn, Map<String, Object> payload) throws Exception {
+    static void upsertOrderItem(Connection conn, Map<String, Object> payload) throws Exception {
         try (PreparedStatement ps = conn.prepareStatement("""
                 INSERT INTO operational.order_items (
                     order_id, product_name, quantity, price_at_purchase, source_record_type,
@@ -376,7 +376,7 @@ public class LocalLambdaConsumer {
         }
     }
 
-    private void upsertAddress(Connection conn, Map<String, Object> payload) throws Exception {
+    static void upsertAddress(Connection conn, Map<String, Object> payload) throws Exception {
         try (PreparedStatement ps = conn.prepareStatement("""
                 INSERT INTO client.addresses (
                     customer_id, address_type, street, city, state, zip_code, source_record_type,
@@ -405,7 +405,7 @@ public class LocalLambdaConsumer {
         }
     }
 
-    private void upsertContactNumber(Connection conn, Map<String, Object> payload) throws Exception {
+    static void upsertContactNumber(Connection conn, Map<String, Object> payload) throws Exception {
         try (PreparedStatement ps = conn.prepareStatement("""
                 INSERT INTO operational.contact_numbers (
                     customer_id, phone_type, phone_number, source_record_type, source_ts_ms,
@@ -428,7 +428,7 @@ public class LocalLambdaConsumer {
         }
     }
 
-    private void upsertTransactionMetadata(Connection conn, Map<String, Object> payload) throws Exception {
+    static void upsertTransactionMetadata(Connection conn, Map<String, Object> payload) throws Exception {
         try (PreparedStatement ps = conn.prepareStatement("""
                 INSERT INTO cdc.transaction_metadata (tx_id, status, event_count, data_collections, ts_ms, updated_at)
                 VALUES (?, ?, ?, ?::jsonb, ?, NOW())
@@ -448,7 +448,7 @@ public class LocalLambdaConsumer {
         }
     }
 
-    private void insertRawEvent(Connection conn, String topic, int partition, long offset, Map<String, Object> payload) throws Exception {
+    static void insertRawEvent(Connection conn, String topic, int partition, long offset, Map<String, Object> payload) throws Exception {
         String table = topic.startsWith("client.") ? "client.events" : "operational.events";
         try (PreparedStatement ps = conn.prepareStatement("""
                 INSERT INTO %s (topic, kafka_partition, kafka_offset, payload)
@@ -476,7 +476,7 @@ public class LocalLambdaConsumer {
         return value == null || value.isBlank() ? defaultValue : value;
     }
 
-    private static String requiredText(Map<String, Object> payload, String field) {
+    static String requiredText(Map<String, Object> payload, String field) {
         Object value = payload.get(field);
         if (value == null || value.toString().isBlank()) {
             throw new IllegalArgumentException("Missing required field: " + field);
@@ -484,12 +484,12 @@ public class LocalLambdaConsumer {
         return value.toString();
     }
 
-    private static String optionalText(Map<String, Object> payload, String field) {
+    static String optionalText(Map<String, Object> payload, String field) {
         Object value = payload.get(field);
         return value == null ? null : value.toString();
     }
 
-    private static long requiredLong(Map<String, Object> payload, String field) {
+    static long requiredLong(Map<String, Object> payload, String field) {
         Object value = payload.get(field);
         if (value instanceof Number number) {
             return number.longValue();
@@ -497,7 +497,7 @@ public class LocalLambdaConsumer {
         return Long.parseLong(requiredText(payload, field));
     }
 
-    private static int requiredInt(Map<String, Object> payload, String field) {
+    static int requiredInt(Map<String, Object> payload, String field) {
         Object value = payload.get(field);
         if (value instanceof Number number) {
             return number.intValue();
@@ -505,12 +505,12 @@ public class LocalLambdaConsumer {
         return Integer.parseInt(requiredText(payload, field));
     }
 
-    private static BigDecimal optionalDecimal(Map<String, Object> payload, String field) {
+    static BigDecimal optionalDecimal(Map<String, Object> payload, String field) {
         Object value = payload.get(field);
         return value == null ? null : new BigDecimal(value.toString());
     }
 
-    private static void setSourceMetadata(PreparedStatement ps, int start, Map<String, Object> payload) throws Exception {
+    static void setSourceMetadata(PreparedStatement ps, int start, Map<String, Object> payload) throws Exception {
         ps.setString(start, optionalText(payload, "source_record_type"));
         setNullableLong(ps, start + 1, optionalLong(payload, "source_ts_ms"));
         ps.setString(start + 2, optionalText(payload, "source_tx_id"));
@@ -518,7 +518,7 @@ public class LocalLambdaConsumer {
         setNullableLong(ps, start + 4, optionalLong(payload, "source_tx_data_collection_order"));
     }
 
-    private static Long optionalLong(Map<String, Object> payload, String field) {
+    static Long optionalLong(Map<String, Object> payload, String field) {
         Object value = payload.get(field);
         if (value == null || value.toString().isBlank()) {
             return null;
@@ -529,7 +529,7 @@ public class LocalLambdaConsumer {
         return Long.parseLong(value.toString());
     }
 
-    private static void setNullableLong(PreparedStatement ps, int index, Long value) throws Exception {
+    static void setNullableLong(PreparedStatement ps, int index, Long value) throws Exception {
         if (value == null) {
             ps.setObject(index, null);
         } else {
