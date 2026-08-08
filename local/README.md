@@ -1,6 +1,8 @@
-# Local Integration Stack
+# Local Integration Assets
 
-This directory contains the local CDC/Flink stack used by the current migration project.
+This directory contains shared local CDC/Flink assets used by the current migration project.
+
+The legacy single-stack proof of concept is defined in `examples/legacy-single-stack-poc/docker-compose.yml`.
 
 It validates the first part of the target architecture before using AWS:
 
@@ -39,7 +41,7 @@ local legacy PostgreSQL
 From the repository root:
 
 ```bash
-docker compose -f local/docker-compose.yml up -d
+docker compose -f examples/legacy-single-stack-poc/docker-compose.yml up -d
 ```
 
 The stack automatically:
@@ -115,7 +117,7 @@ docker exec -it local-target-postgres psql -U appuser -d microservices \
 If the one-shot `flink-sql-init` service fails or you change `local/flink/sql/init.sql`, run:
 
 ```bash
-docker compose -f local/docker-compose.yml run --rm flink-sql-init
+docker compose -f examples/legacy-single-stack-poc/docker-compose.yml run --rm flink-sql-init
 ```
 
 Interactive SQL client:
@@ -127,10 +129,10 @@ docker exec -it local-flink-jobmanager /opt/flink/bin/sql-client.sh
 ## Logs
 
 ```bash
-docker compose -f local/docker-compose.yml logs --tail=200 connect
-docker compose -f local/docker-compose.yml logs --tail=200 flink-jobmanager
-docker compose -f local/docker-compose.yml logs --tail=200 flink-taskmanager
-docker compose -f local/docker-compose.yml logs --tail=200 flink-sql-init
+docker compose -f examples/legacy-single-stack-poc/docker-compose.yml logs --tail=200 connect
+docker compose -f examples/legacy-single-stack-poc/docker-compose.yml logs --tail=200 flink-jobmanager
+docker compose -f examples/legacy-single-stack-poc/docker-compose.yml logs --tail=200 flink-taskmanager
+docker compose -f examples/legacy-single-stack-poc/docker-compose.yml logs --tail=200 flink-sql-init
 ```
 
 ## Manual Connector Recreate
@@ -144,19 +146,19 @@ The compose stack registers the connector automatically. To recreate it manually
 If connector registration fails, inspect the one-shot container logs. They now include the Kafka Connect HTTP response body:
 
 ```bash
-docker compose -f local/docker-compose.yml logs --tail=200 dbz-init
+docker compose -f examples/legacy-single-stack-poc/docker-compose.yml logs --tail=200 dbz-init
 ```
 
 ## Stop
 
 ```bash
-docker compose -f local/docker-compose.yml down
+docker compose -f examples/legacy-single-stack-poc/docker-compose.yml down
 ```
 
 Delete local volumes:
 
 ```bash
-docker compose -f local/docker-compose.yml down -v
+docker compose -f examples/legacy-single-stack-poc/docker-compose.yml down -v
 ```
 
 ## Current Scope

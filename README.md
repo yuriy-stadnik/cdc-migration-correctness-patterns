@@ -91,7 +91,7 @@ This project creates billable AWS resources, including NAT Gateway, EC2, MSK Ser
 
 ## Local Integration Stack
 
-The `local/` directory contains a Docker Compose stack for validating the first part of the CDC pipeline before using AWS:
+The legacy single-stack proof of concept validates the first part of the CDC pipeline before using AWS:
 
 ```text
 local legacy PostgreSQL
@@ -104,10 +104,10 @@ local legacy PostgreSQL
 Start it from the repository root:
 
 ```bash
-docker compose -f local/docker-compose.yml up -d
+docker compose -f examples/legacy-single-stack-poc/docker-compose.yml up -d
 ```
 
-The stack packages the local CDC components directly in this repository: one-shot PostgreSQL init, one-shot Debezium connector registration, Flink connector JAR mounting, Kafka UI, and a basic Flink SQL projection into target PostgreSQL. See `local/README.md` for topic checks, source-change commands, and cleanup steps.
+The stack is defined in `examples/legacy-single-stack-poc/docker-compose.yml` and reuses local CDC assets from `local/`: one-shot PostgreSQL init, one-shot Debezium connector registration, Flink connector JAR mounting, Kafka UI, and a basic Flink SQL projection into target PostgreSQL. See `local/README.md` for topic checks, source-change commands, and cleanup steps.
 
 ## Local Two-Compose Migration Emulation
 

@@ -90,7 +90,7 @@ services:
         condition: service_healthy
     restart: "no"
     volumes:
-      - ./postgres/init:/init:ro
+      - ../../local/postgres/init:/init:ro
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
@@ -113,7 +113,7 @@ services:
       POSTGRES_PASSWORD: apppass
     volumes:
       - target-postgres-data:/var/lib/postgresql/data
-      - ./target/init:/docker-entrypoint-initdb.d:ro
+      - ../../local/target/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U appuser -d microservices"]
       interval: 5s
@@ -165,7 +165,7 @@ services:
         condition: service_healthy
     restart: "no"
     volumes:
-      - ./connectors:/connectors:ro
+      - ../../local/connectors:/connectors:ro
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
@@ -203,9 +203,9 @@ services:
         state.backend.type: hashmap
         execution.checkpointing.interval: 10s
     volumes:
-      - ./flink/sql/init.sql:/opt/flink/init.sql:ro
-      - ./flink-usrlib/plugins:/opt/flink/plugins:ro
-      - ./flink-usrlib:/opt/flink/usrlib:ro
+      - ../../local/flink/sql/init.sql:/opt/flink/init.sql:ro
+      - ../../local/flink-usrlib/plugins:/opt/flink/plugins:ro
+      - ../../local/flink-usrlib:/opt/flink/usrlib:ro
 
   flink-taskmanager:
     image: flink:1.19.1-scala_2.12-java17
@@ -226,8 +226,8 @@ services:
         state.backend.type: hashmap
         execution.checkpointing.interval: 10s
     volumes:
-      - ./flink-usrlib/plugins:/opt/flink/plugins:ro
-      - ./flink-usrlib:/opt/flink/usrlib:ro
+      - ../../local/flink-usrlib/plugins:/opt/flink/plugins:ro
+      - ../../local/flink-usrlib:/opt/flink/usrlib:ro
 
   flink-sql-init:
     image: flink:1.19.1-scala_2.12-java17
@@ -244,9 +244,9 @@ services:
         condition: service_started
     restart: "no"
     volumes:
-      - ./flink/sql/init.sql:/opt/flink/init.sql:ro
-      - ./flink-usrlib/plugins:/opt/flink/plugins:ro
-      - ./flink-usrlib:/opt/flink/usrlib:ro
+      - ../../local/flink/sql/init.sql:/opt/flink/init.sql:ro
+      - ../../local/flink-usrlib/plugins:/opt/flink/plugins:ro
+      - ../../local/flink-usrlib:/opt/flink/usrlib:ro
     command: >
       bash -lc "
         set -e;
