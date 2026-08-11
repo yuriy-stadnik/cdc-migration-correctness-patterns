@@ -132,8 +132,8 @@ wait_for_sql_count local-cloud-client-postgres clientdb "cloud client address ro
 wait_for_sql_count local-cloud-operational-postgres operationaldb "cloud operational order row" "1" "SELECT count(*) FROM operational.orders WHERE id = ${ORDER_ID}"
 wait_for_sql_count local-cloud-operational-postgres operationaldb "cloud operational home phone" "1" "SELECT count(*) FROM operational.contact_numbers WHERE customer_id = ${CUSTOMER_ID} AND phone_type = 'HOME' AND phone_number = '201-555-7777'"
 wait_for_sql_count local-cloud-operational-postgres operationaldb "cloud operational mobile phone" "1" "SELECT count(*) FROM operational.contact_numbers WHERE customer_id = ${CUSTOMER_ID} AND phone_type = 'MOBILE' AND phone_number = '201-555-7778'"
-wait_for_sql_count local-cloud-client-postgres clientdb "cloud client source metadata" "1" "SELECT count(*) FROM client.customers WHERE id = ${CUSTOMER_ID} AND source_record_type = 'I' AND source_ts_ms IS NOT NULL AND source_tx_id IS NOT NULL"
-wait_for_sql_count local-cloud-operational-postgres operationaldb "cloud operational source metadata" "1" "SELECT count(*) FROM operational.orders WHERE id = ${ORDER_ID} AND source_record_type = 'I' AND source_ts_ms IS NOT NULL AND source_tx_id IS NOT NULL"
+wait_for_sql_count local-cloud-client-postgres clientdb "cloud client source metadata" "1" "SELECT count(*) FROM client.customers WHERE id = ${CUSTOMER_ID} AND source_record_type = 'I' AND source_ts_ms IS NOT NULL AND source_tx_id IS NOT NULL AND idempotency_key IS NOT NULL"
+wait_for_sql_count local-cloud-operational-postgres operationaldb "cloud operational source metadata" "1" "SELECT count(*) FROM operational.orders WHERE id = ${ORDER_ID} AND source_record_type = 'I' AND source_ts_ms IS NOT NULL AND source_tx_id IS NOT NULL AND idempotency_key IS NOT NULL"
 wait_for_sql_count local-cloud-operational-postgres operationaldb "cloud transaction metadata end row" "1" "SELECT CASE WHEN count(*) >= 1 THEN 1 ELSE 0 END FROM cdc.transaction_metadata WHERE status = 'END' AND event_count IS NOT NULL"
 
 echo "Cloud client counts:"

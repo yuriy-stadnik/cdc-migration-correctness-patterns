@@ -9,6 +9,7 @@ docker exec local-cloud-client-postgres pg_isready -U appuser -d clientdb >/dev/
 require_sql_count local-cloud-client-postgres clientdb 1 "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'client' AND table_name = 'customers'"
 require_sql_count local-cloud-client-postgres clientdb 1 "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'client' AND table_name = 'addresses'"
 require_sql_count local-cloud-client-postgres clientdb 1 "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'client' AND table_name = 'customers' AND column_name = 'source_tx_id'"
+require_sql_count local-cloud-client-postgres clientdb 1 "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'client' AND table_name = 'customers' AND column_name = 'idempotency_key' AND data_type = 'character varying'"
 require_sql_count local-cloud-client-postgres clientdb 1 "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'cdc' AND table_name = 'transaction_metadata'"
 
 docker exec -i local-cloud-client-postgres psql -U appuser -d clientdb <<'SQL'

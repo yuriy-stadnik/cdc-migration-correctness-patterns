@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS operational.products (
   source_record_type TEXT,
   source_ts_ms BIGINT,
   source_tx_id TEXT,
+  idempotency_key VARCHAR(255),
   source_tx_total_order BIGINT,
   source_tx_data_collection_order BIGINT
 );
@@ -20,6 +21,7 @@ CREATE TABLE IF NOT EXISTS operational.orders (
   source_record_type TEXT,
   source_ts_ms BIGINT,
   source_tx_id TEXT,
+  idempotency_key VARCHAR(255),
   source_tx_total_order BIGINT,
   source_tx_data_collection_order BIGINT
 );
@@ -32,6 +34,7 @@ CREATE TABLE IF NOT EXISTS operational.order_items (
   source_record_type TEXT,
   source_ts_ms BIGINT,
   source_tx_id TEXT,
+  idempotency_key VARCHAR(255),
   source_tx_total_order BIGINT,
   source_tx_data_collection_order BIGINT,
   PRIMARY KEY (order_id, product_name)
@@ -44,6 +47,7 @@ CREATE TABLE IF NOT EXISTS operational.contact_numbers (
   source_record_type TEXT,
   source_ts_ms BIGINT,
   source_tx_id TEXT,
+  idempotency_key VARCHAR(255),
   source_tx_total_order BIGINT,
   source_tx_data_collection_order BIGINT,
   PRIMARY KEY (customer_id, phone_type)

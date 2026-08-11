@@ -11,6 +11,7 @@ require_sql_count local-cloud-operational-postgres operationaldb 1 "SELECT count
 require_sql_count local-cloud-operational-postgres operationaldb 1 "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'operational' AND table_name = 'order_items'"
 require_sql_count local-cloud-operational-postgres operationaldb 1 "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'operational' AND table_name = 'contact_numbers'"
 require_sql_count local-cloud-operational-postgres operationaldb 1 "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'operational' AND table_name = 'orders' AND column_name = 'source_tx_id'"
+require_sql_count local-cloud-operational-postgres operationaldb 1 "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'operational' AND table_name = 'orders' AND column_name = 'idempotency_key' AND data_type = 'character varying'"
 require_sql_count local-cloud-operational-postgres operationaldb 1 "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'cdc' AND table_name = 'transaction_metadata'"
 
 docker exec -i local-cloud-operational-postgres psql -U appuser -d operationaldb <<'SQL'

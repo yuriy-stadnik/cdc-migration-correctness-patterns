@@ -130,6 +130,7 @@ public class LocalLambdaConsumer {
                       source_record_type TEXT,
                       source_ts_ms BIGINT,
                       source_tx_id TEXT,
+                      idempotency_key VARCHAR(255),
                       source_tx_total_order BIGINT,
                       source_tx_data_collection_order BIGINT
                     );
@@ -144,6 +145,7 @@ public class LocalLambdaConsumer {
                       source_record_type TEXT,
                       source_ts_ms BIGINT,
                       source_tx_id TEXT,
+                      idempotency_key VARCHAR(255),
                       source_tx_total_order BIGINT,
                       source_tx_data_collection_order BIGINT,
                       PRIMARY KEY (customer_id, address_type)
@@ -158,6 +160,12 @@ public class LocalLambdaConsumer {
                       payload JSONB NOT NULL,
                       UNIQUE(topic, kafka_partition, kafka_offset)
                     );
+
+                    ALTER TABLE client.customers
+                      ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(255);
+
+                    ALTER TABLE client.addresses
+                      ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(255);
 
                     CREATE TABLE IF NOT EXISTS cdc.transaction_metadata (
                       tx_id TEXT NOT NULL,
@@ -185,6 +193,7 @@ public class LocalLambdaConsumer {
                       source_record_type TEXT,
                       source_ts_ms BIGINT,
                       source_tx_id TEXT,
+                      idempotency_key VARCHAR(255),
                       source_tx_total_order BIGINT,
                       source_tx_data_collection_order BIGINT
                     );
@@ -197,6 +206,7 @@ public class LocalLambdaConsumer {
                       source_record_type TEXT,
                       source_ts_ms BIGINT,
                       source_tx_id TEXT,
+                      idempotency_key VARCHAR(255),
                       source_tx_total_order BIGINT,
                       source_tx_data_collection_order BIGINT
                     );
@@ -209,6 +219,7 @@ public class LocalLambdaConsumer {
                       source_record_type TEXT,
                       source_ts_ms BIGINT,
                       source_tx_id TEXT,
+                      idempotency_key VARCHAR(255),
                       source_tx_total_order BIGINT,
                       source_tx_data_collection_order BIGINT,
                       PRIMARY KEY (order_id, product_name)
@@ -221,6 +232,7 @@ public class LocalLambdaConsumer {
                       source_record_type TEXT,
                       source_ts_ms BIGINT,
                       source_tx_id TEXT,
+                      idempotency_key VARCHAR(255),
                       source_tx_total_order BIGINT,
                       source_tx_data_collection_order BIGINT,
                       PRIMARY KEY (customer_id, phone_type)
@@ -235,6 +247,18 @@ public class LocalLambdaConsumer {
                       payload JSONB NOT NULL,
                       UNIQUE(topic, kafka_partition, kafka_offset)
                     );
+
+                    ALTER TABLE operational.products
+                      ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(255);
+
+                    ALTER TABLE operational.orders
+                      ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(255);
+
+                    ALTER TABLE operational.order_items
+                      ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(255);
+
+                    ALTER TABLE operational.contact_numbers
+                      ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(255);
 
                     CREATE TABLE IF NOT EXISTS cdc.transaction_metadata (
                       tx_id TEXT NOT NULL,
@@ -273,9 +297,9 @@ public class LocalLambdaConsumer {
                 INSERT INTO client.customers (
                     id, first_name, last_name, email, status, created_at, updated_at,
                     source_record_type, source_ts_ms, source_tx_id, source_tx_total_order,
-                    source_tx_data_collection_order
+                    source_tx_data_collection_order, idempotency_key
                 )
-                VALUES (?, ?, ?, ?, ?, ?::timestamptz, ?::timestamptz, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?::timestamptz, ?::timestamptz, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (id) DO UPDATE
                 SET first_name = EXCLUDED.first_name,
                     last_name = EXCLUDED.last_name,
@@ -287,7 +311,8 @@ public class LocalLambdaConsumer {
                     source_ts_ms = EXCLUDED.source_ts_ms,
                     source_tx_id = EXCLUDED.source_tx_id,
                     source_tx_total_order = EXCLUDED.source_tx_total_order,
-                    source_tx_data_collection_order = EXCLUDED.source_tx_data_collection_order
+                    source_tx_data_collection_order = EXCLUDED.source_tx_data_collection_order,
+                    idempotency_key = EXCLUDED.idempotency_key
                 """)) {
             ps.setLong(1, requiredLong(payload, "id"));
             ps.setString(2, requiredText(payload, "first_name"));
@@ -305,9 +330,9 @@ public class LocalLambdaConsumer {
         try (PreparedStatement ps = conn.prepareStatement("""
                 INSERT INTO operational.products (
                     name, category, current_price, source_record_type, source_ts_ms, source_tx_id,
-                    source_tx_total_order, source_tx_data_collection_order
+                    source_tx_total_order, source_tx_data_collection_order, idempotency_key
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (name) DO UPDATE
                 SET category = EXCLUDED.category,
                     current_price = EXCLUDED.current_price,
@@ -315,7 +340,8 @@ public class LocalLambdaConsumer {
                     source_ts_ms = EXCLUDED.source_ts_ms,
                     source_tx_id = EXCLUDED.source_tx_id,
                     source_tx_total_order = EXCLUDED.source_tx_total_order,
-                    source_tx_data_collection_order = EXCLUDED.source_tx_data_collection_order
+                    source_tx_data_collection_order = EXCLUDED.source_tx_data_collection_order,
+                    idempotency_key = EXCLUDED.idempotency_key
                 """)) {
             ps.setString(1, requiredText(payload, "name"));
             ps.setString(2, optionalText(payload, "category"));
@@ -329,9 +355,9 @@ public class LocalLambdaConsumer {
         try (PreparedStatement ps = conn.prepareStatement("""
                 INSERT INTO operational.orders (
                     id, customer_id, order_date, status, source_record_type, source_ts_ms,
-                    source_tx_id, source_tx_total_order, source_tx_data_collection_order
+                    source_tx_id, source_tx_total_order, source_tx_data_collection_order, idempotency_key
                 )
-                VALUES (?, ?, ?::timestamptz, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?::timestamptz, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (id) DO UPDATE
                 SET customer_id = EXCLUDED.customer_id,
                     order_date = EXCLUDED.order_date,
@@ -340,7 +366,8 @@ public class LocalLambdaConsumer {
                     source_ts_ms = EXCLUDED.source_ts_ms,
                     source_tx_id = EXCLUDED.source_tx_id,
                     source_tx_total_order = EXCLUDED.source_tx_total_order,
-                    source_tx_data_collection_order = EXCLUDED.source_tx_data_collection_order
+                    source_tx_data_collection_order = EXCLUDED.source_tx_data_collection_order,
+                    idempotency_key = EXCLUDED.idempotency_key
                 """)) {
             ps.setLong(1, requiredLong(payload, "id"));
             ps.setLong(2, requiredLong(payload, "customer_id"));
@@ -355,9 +382,10 @@ public class LocalLambdaConsumer {
         try (PreparedStatement ps = conn.prepareStatement("""
                 INSERT INTO operational.order_items (
                     order_id, product_name, quantity, price_at_purchase, source_record_type,
-                    source_ts_ms, source_tx_id, source_tx_total_order, source_tx_data_collection_order
+                    source_ts_ms, source_tx_id, source_tx_total_order, source_tx_data_collection_order,
+                    idempotency_key
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (order_id, product_name) DO UPDATE
                 SET quantity = EXCLUDED.quantity,
                     price_at_purchase = EXCLUDED.price_at_purchase,
@@ -365,7 +393,8 @@ public class LocalLambdaConsumer {
                     source_ts_ms = EXCLUDED.source_ts_ms,
                     source_tx_id = EXCLUDED.source_tx_id,
                     source_tx_total_order = EXCLUDED.source_tx_total_order,
-                    source_tx_data_collection_order = EXCLUDED.source_tx_data_collection_order
+                    source_tx_data_collection_order = EXCLUDED.source_tx_data_collection_order,
+                    idempotency_key = EXCLUDED.idempotency_key
                 """)) {
             ps.setLong(1, requiredLong(payload, "order_id"));
             ps.setString(2, requiredText(payload, "product_name"));
@@ -380,9 +409,10 @@ public class LocalLambdaConsumer {
         try (PreparedStatement ps = conn.prepareStatement("""
                 INSERT INTO client.addresses (
                     customer_id, address_type, street, city, state, zip_code, source_record_type,
-                    source_ts_ms, source_tx_id, source_tx_total_order, source_tx_data_collection_order
+                    source_ts_ms, source_tx_id, source_tx_total_order, source_tx_data_collection_order,
+                    idempotency_key
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (customer_id, address_type) DO UPDATE
                 SET street = EXCLUDED.street,
                     city = EXCLUDED.city,
@@ -392,7 +422,8 @@ public class LocalLambdaConsumer {
                     source_ts_ms = EXCLUDED.source_ts_ms,
                     source_tx_id = EXCLUDED.source_tx_id,
                     source_tx_total_order = EXCLUDED.source_tx_total_order,
-                    source_tx_data_collection_order = EXCLUDED.source_tx_data_collection_order
+                    source_tx_data_collection_order = EXCLUDED.source_tx_data_collection_order,
+                    idempotency_key = EXCLUDED.idempotency_key
                 """)) {
             ps.setLong(1, requiredLong(payload, "customer_id"));
             ps.setString(2, requiredText(payload, "address_type"));
@@ -409,16 +440,17 @@ public class LocalLambdaConsumer {
         try (PreparedStatement ps = conn.prepareStatement("""
                 INSERT INTO operational.contact_numbers (
                     customer_id, phone_type, phone_number, source_record_type, source_ts_ms,
-                    source_tx_id, source_tx_total_order, source_tx_data_collection_order
+                    source_tx_id, source_tx_total_order, source_tx_data_collection_order, idempotency_key
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (customer_id, phone_type) DO UPDATE
                 SET phone_number = EXCLUDED.phone_number,
                     source_record_type = EXCLUDED.source_record_type,
                     source_ts_ms = EXCLUDED.source_ts_ms,
                     source_tx_id = EXCLUDED.source_tx_id,
                     source_tx_total_order = EXCLUDED.source_tx_total_order,
-                    source_tx_data_collection_order = EXCLUDED.source_tx_data_collection_order
+                    source_tx_data_collection_order = EXCLUDED.source_tx_data_collection_order,
+                    idempotency_key = EXCLUDED.idempotency_key
                 """)) {
             ps.setLong(1, requiredLong(payload, "customer_id"));
             ps.setString(2, requiredText(payload, "phone_type"));
@@ -516,6 +548,7 @@ public class LocalLambdaConsumer {
         ps.setString(start + 2, optionalText(payload, "source_tx_id"));
         setNullableLong(ps, start + 3, optionalLong(payload, "source_tx_total_order"));
         setNullableLong(ps, start + 4, optionalLong(payload, "source_tx_data_collection_order"));
+        ps.setString(start + 5, optionalText(payload, "idempotency_key"));
     }
 
     static Long optionalLong(Map<String, Object> payload, String field) {

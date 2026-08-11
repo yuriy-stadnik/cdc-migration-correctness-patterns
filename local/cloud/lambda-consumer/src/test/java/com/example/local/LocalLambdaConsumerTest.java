@@ -6,6 +6,7 @@ import org.mockito.ArgumentCaptor;
 import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -38,6 +39,7 @@ class LocalLambdaConsumerTest {
                 Map.entry("source_record_type", "u"),
                 Map.entry("source_ts_ms", "1785492930000"),
                 Map.entry("source_tx_id", "tx-1"),
+                Map.entry("idempotency_key", "tx-1"),
                 Map.entry("source_tx_total_order", 3),
                 Map.entry("source_tx_data_collection_order", 2)
         );
@@ -58,6 +60,7 @@ class LocalLambdaConsumerTest {
         verify(ps).setString(10, "tx-1");
         verify(ps).setLong(11, 3L);
         verify(ps).setLong(12, 2L);
+        verify(ps).setString(13, "tx-1");
         verify(ps).executeUpdate();
     }
 
@@ -96,6 +99,9 @@ class LocalLambdaConsumerTest {
         PreparedStatement ps = mock(PreparedStatement.class);
         ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
         when(clientConn.prepareStatement(sql.capture())).thenReturn(ps);
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("id", 7);
+        payload.put("name", "sample");
 
         LocalLambdaConsumer.upsert(
                 clientConn,
@@ -103,7 +109,7 @@ class LocalLambdaConsumerTest {
                 "client.unmapped",
                 2,
                 99L,
-                Map.of("id", 7, "name", "sample")
+                payload
         );
 
         assertTrue(sql.getValue().contains("INSERT INTO client.events"));

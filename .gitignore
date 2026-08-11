@@ -7,6 +7,7 @@ crash.log
 crash.*.log
 *.tfvars
 *.tfvars.json
+*.tfplan
 override.tf
 override.tf.json
 *_override.tf
@@ -16,9 +17,15 @@ override.tf.json
 lambda_java/.gradle/
 lambda_java/build/
 lambda_java/bin/
+local/cloud/lambda-consumer/.gradle/
+local/cloud/lambda-consumer/build/
+local/cloud/lambda-consumer/bin/
 
 # Local/editor/OS files
 .DS_Store
+.Rhistory
+.env
+*.env
 *.swp
 *.swo
 .idea/

@@ -116,6 +116,7 @@ CREATE TABLE client_customers_topic (
   source_record_type STRING,
   source_ts_ms BIGINT,
   source_tx_id STRING,
+  idempotency_key STRING,
   source_tx_total_order BIGINT,
   source_tx_data_collection_order BIGINT,
   PRIMARY KEY (id) NOT ENFORCED
@@ -137,6 +138,7 @@ CREATE TABLE client_addresses_topic (
   source_record_type STRING,
   source_ts_ms BIGINT,
   source_tx_id STRING,
+  idempotency_key STRING,
   source_tx_total_order BIGINT,
   source_tx_data_collection_order BIGINT,
   PRIMARY KEY (customer_id, address_type) NOT ENFORCED
@@ -155,6 +157,7 @@ CREATE TABLE operational_products_topic (
   source_record_type STRING,
   source_ts_ms BIGINT,
   source_tx_id STRING,
+  idempotency_key STRING,
   source_tx_total_order BIGINT,
   source_tx_data_collection_order BIGINT,
   PRIMARY KEY (name) NOT ENFORCED
@@ -174,6 +177,7 @@ CREATE TABLE operational_orders_topic (
   source_record_type STRING,
   source_ts_ms BIGINT,
   source_tx_id STRING,
+  idempotency_key STRING,
   source_tx_total_order BIGINT,
   source_tx_data_collection_order BIGINT,
   PRIMARY KEY (id) NOT ENFORCED
@@ -193,6 +197,7 @@ CREATE TABLE operational_order_items_topic (
   source_record_type STRING,
   source_ts_ms BIGINT,
   source_tx_id STRING,
+  idempotency_key STRING,
   source_tx_total_order BIGINT,
   source_tx_data_collection_order BIGINT,
   PRIMARY KEY (order_id, product_name) NOT ENFORCED
@@ -211,6 +216,7 @@ CREATE TABLE operational_contact_numbers_topic (
   source_record_type STRING,
   source_ts_ms BIGINT,
   source_tx_id STRING,
+  idempotency_key STRING,
   source_tx_total_order BIGINT,
   source_tx_data_collection_order BIGINT,
   PRIMARY KEY (customer_id, phone_type) NOT ENFORCED
@@ -234,6 +240,7 @@ SELECT
   CASE op WHEN 'c' THEN 'I' WHEN 'r' THEN 'I' WHEN 'u' THEN 'U' WHEN 'd' THEN 'D' ELSE op END AS source_record_type,
   ts_ms AS source_ts_ms,
   `transaction`.id AS source_tx_id,
+  `transaction`.id AS idempotency_key,
   `transaction`.total_order AS source_tx_total_order,
   `transaction`.data_collection_order AS source_tx_data_collection_order
 FROM customers_cdc
@@ -250,6 +257,7 @@ SELECT
   CASE op WHEN 'c' THEN 'I' WHEN 'r' THEN 'I' WHEN 'u' THEN 'U' WHEN 'd' THEN 'D' ELSE op END AS source_record_type,
   ts_ms AS source_ts_ms,
   `transaction`.id AS source_tx_id,
+  `transaction`.id AS idempotency_key,
   `transaction`.total_order AS source_tx_total_order,
   `transaction`.data_collection_order AS source_tx_data_collection_order
 FROM accounts_cdc
@@ -263,6 +271,7 @@ SELECT
   CASE op WHEN 'c' THEN 'I' WHEN 'r' THEN 'I' WHEN 'u' THEN 'U' WHEN 'd' THEN 'D' ELSE op END AS source_record_type,
   ts_ms AS source_ts_ms,
   `transaction`.id AS source_tx_id,
+  `transaction`.id AS idempotency_key,
   `transaction`.total_order AS source_tx_total_order,
   `transaction`.data_collection_order AS source_tx_data_collection_order
 FROM accounts_cdc
@@ -276,6 +285,7 @@ SELECT
   CASE op WHEN 'c' THEN 'I' WHEN 'r' THEN 'I' WHEN 'u' THEN 'U' WHEN 'd' THEN 'D' ELSE op END AS source_record_type,
   ts_ms AS source_ts_ms,
   `transaction`.id AS source_tx_id,
+  `transaction`.id AS idempotency_key,
   `transaction`.total_order AS source_tx_total_order,
   `transaction`.data_collection_order AS source_tx_data_collection_order
 FROM accounts_cdc
@@ -289,6 +299,7 @@ SELECT
   CASE op WHEN 'c' THEN 'I' WHEN 'r' THEN 'I' WHEN 'u' THEN 'U' WHEN 'd' THEN 'D' ELSE op END AS source_record_type,
   ts_ms AS source_ts_ms,
   `transaction`.id AS source_tx_id,
+  `transaction`.id AS idempotency_key,
   `transaction`.total_order AS source_tx_total_order,
   `transaction`.data_collection_order AS source_tx_data_collection_order
 FROM accounts_cdc
@@ -302,6 +313,7 @@ SELECT
   CASE op WHEN 'c' THEN 'I' WHEN 'r' THEN 'I' WHEN 'u' THEN 'U' WHEN 'd' THEN 'D' ELSE op END AS source_record_type,
   ts_ms AS source_ts_ms,
   `transaction`.id AS source_tx_id,
+  `transaction`.id AS idempotency_key,
   `transaction`.total_order AS source_tx_total_order,
   `transaction`.data_collection_order AS source_tx_data_collection_order
 FROM orders_flat_cdc
@@ -316,6 +328,7 @@ SELECT
   CASE op WHEN 'c' THEN 'I' WHEN 'r' THEN 'I' WHEN 'u' THEN 'U' WHEN 'd' THEN 'D' ELSE op END AS source_record_type,
   ts_ms AS source_ts_ms,
   `transaction`.id AS source_tx_id,
+  `transaction`.id AS idempotency_key,
   `transaction`.total_order AS source_tx_total_order,
   `transaction`.data_collection_order AS source_tx_data_collection_order
 FROM orders_flat_cdc
@@ -330,6 +343,7 @@ SELECT
   CASE op WHEN 'c' THEN 'I' WHEN 'r' THEN 'I' WHEN 'u' THEN 'U' WHEN 'd' THEN 'D' ELSE op END AS source_record_type,
   ts_ms AS source_ts_ms,
   `transaction`.id AS source_tx_id,
+  `transaction`.id AS idempotency_key,
   `transaction`.total_order AS source_tx_total_order,
   `transaction`.data_collection_order AS source_tx_data_collection_order
 FROM orders_flat_cdc

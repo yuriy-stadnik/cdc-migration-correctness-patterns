@@ -201,7 +201,7 @@ cloud replacement compose:
 The split flow also carries Debezium transaction metadata:
 
 - `pg1.transaction` is replicated to the cloud replacement Kafka.
-- Each derived data topic includes `source_record_type`, `source_ts_ms`, `source_tx_id`, `source_tx_total_order`, and `source_tx_data_collection_order`.
+- Each derived data topic includes `source_record_type`, `source_ts_ms`, `source_tx_id`, `idempotency_key`, `source_tx_total_order`, and `source_tx_data_collection_order`.
 - Each destination business table stores those same source metadata columns.
 - `cdc.transaction_metadata` stores transaction `BEGIN` and `END` rows with `event_count`, `data_collections`, and `ts_ms` for consistency checks and orchestration.
 

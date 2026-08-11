@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS client.customers (
   source_record_type TEXT,
   source_ts_ms BIGINT,
   source_tx_id TEXT,
+  idempotency_key VARCHAR(255),
   source_tx_total_order BIGINT,
   source_tx_data_collection_order BIGINT
 );
@@ -26,6 +27,7 @@ CREATE TABLE IF NOT EXISTS client.addresses (
   source_record_type TEXT,
   source_ts_ms BIGINT,
   source_tx_id TEXT,
+  idempotency_key VARCHAR(255),
   source_tx_total_order BIGINT,
   source_tx_data_collection_order BIGINT,
   PRIMARY KEY (customer_id, address_type)
