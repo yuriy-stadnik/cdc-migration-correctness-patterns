@@ -11,6 +11,24 @@ SELECT 'customers' AS table_name, count(*) FROM inventory.customers
 UNION ALL SELECT 'accounts', count(*) FROM inventory.accounts
 UNION ALL SELECT 'orders_flat', count(*) FROM inventory.orders_flat
 ORDER BY table_name;
+
+SELECT n.nspname || '.' || c.relname AS table_name, c.relreplident
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'inventory'
+  AND c.relname IN ('customers', 'accounts', 'orders_flat')
+  AND c.relreplident = 'f'
+ORDER BY table_name;
 SQL
+
+actual_replica_identity_full="$(
+  docker exec -i local-source-postgres psql -U postgres -d appdb -tAc \
+    "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'inventory' AND c.relname IN ('customers', 'accounts', 'orders_flat') AND c.relreplident = 'f'" \
+    | tr -d '[:space:]'
+)"
+if [ "$actual_replica_identity_full" != "3" ]; then
+  echo "Expected REPLICA IDENTITY FULL on all inventory source tables" >&2
+  exit 1
+fi
 
 echo "source-postgres: ok"

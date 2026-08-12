@@ -177,6 +177,18 @@ docker exec -i local-cloud-operational-postgres psql -U appuser -d operationaldb
    ORDER BY updated_at DESC
    LIMIT 5;"
 
+echo "Cloud client processed_events:"
+docker exec -i local-cloud-client-postgres psql -U appuser -d clientdb -c \
+  "SELECT event_id, source_tx_id, source_tx_total_order, target_topic, target_business_key, processed_at
+   FROM cdc.processed_events
+   ORDER BY processed_at, target_topic, target_business_key;"
+
+echo "Cloud operational processed_events:"
+docker exec -i local-cloud-operational-postgres psql -U appuser -d operationaldb -c \
+  "SELECT event_id, source_tx_id, source_tx_total_order, target_topic, target_business_key, processed_at
+   FROM cdc.processed_events
+   ORDER BY processed_at, target_topic, target_business_key;"
+
 echo "Cloud contact sample:"
 docker exec -i local-cloud-operational-postgres psql -U appuser -d operationaldb -c \
   "SELECT customer_id, phone_type, phone_number

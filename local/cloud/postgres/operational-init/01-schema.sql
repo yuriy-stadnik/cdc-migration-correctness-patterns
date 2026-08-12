@@ -63,6 +63,16 @@ CREATE TABLE IF NOT EXISTS operational.events (
   UNIQUE(topic, kafka_partition, kafka_offset)
 );
 
+CREATE TABLE IF NOT EXISTS cdc.processed_events (
+  event_id TEXT PRIMARY KEY,
+  source_tx_id TEXT NOT NULL,
+  source_tx_total_order BIGINT,
+  target_topic TEXT NOT NULL,
+  target_business_key TEXT NOT NULL,
+  processed_at TIMESTAMPTZ DEFAULT NOW(),
+  payload JSONB NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS cdc.transaction_metadata (
   tx_id TEXT NOT NULL,
   status TEXT NOT NULL,

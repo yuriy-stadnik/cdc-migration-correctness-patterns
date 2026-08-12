@@ -25,8 +25,11 @@ class LocalLambdaConsumerTest {
     void upsertCustomerBindsPayloadAndSourceMetadata() throws Exception {
         Connection clientConn = mock(Connection.class);
         Connection operationalConn = mock(Connection.class);
-        PreparedStatement ps = mock(PreparedStatement.class);
-        when(clientConn.prepareStatement(anyString())).thenReturn(ps);
+        PreparedStatement processedPs = mock(PreparedStatement.class);
+        PreparedStatement businessPs = mock(PreparedStatement.class);
+        when(clientConn.getAutoCommit()).thenReturn(true);
+        when(clientConn.prepareStatement(anyString())).thenReturn(processedPs, businessPs);
+        when(processedPs.executeUpdate()).thenReturn(1);
 
         Map<String, Object> payload = Map.ofEntries(
                 Map.entry("id", "42"),
@@ -39,29 +42,95 @@ class LocalLambdaConsumerTest {
                 Map.entry("source_record_type", "u"),
                 Map.entry("source_ts_ms", "1785492930000"),
                 Map.entry("source_tx_id", "tx-1"),
-                Map.entry("idempotency_key", "tx-1"),
+                Map.entry("idempotency_key", "tx-1|3|client.customers|42"),
                 Map.entry("source_tx_total_order", 3),
                 Map.entry("source_tx_data_collection_order", 2)
         );
 
         LocalLambdaConsumer.upsert(clientConn, operationalConn, "client.customers", 0, 100L, payload);
 
-        verify(clientConn).prepareStatement(anyString());
+        verify(processedPs).setString(1, "tx-1|3|client.customers|42");
+        verify(processedPs).setString(2, "tx-1");
+        verify(processedPs).setLong(3, 3L);
+        verify(processedPs).setString(4, "client.customers");
+        verify(processedPs).setString(5, "42");
+        verify(processedPs).executeUpdate();
+        verify(clientConn).commit();
+        verify(clientConn).setAutoCommit(false);
+        verify(clientConn).setAutoCommit(true);
         verify(operationalConn, never()).prepareStatement(anyString());
-        verify(ps).setLong(1, 42L);
-        verify(ps).setString(2, "Ada");
-        verify(ps).setString(3, "Lovelace");
-        verify(ps).setString(4, "ada@example.com");
-        verify(ps).setString(5, "active");
-        verify(ps).setString(6, "2026-07-31T10:15:30Z");
-        verify(ps).setString(7, "2026-07-31T10:16:30Z");
-        verify(ps).setString(8, "u");
-        verify(ps).setLong(9, 1785492930000L);
-        verify(ps).setString(10, "tx-1");
-        verify(ps).setLong(11, 3L);
-        verify(ps).setLong(12, 2L);
-        verify(ps).setString(13, "tx-1");
-        verify(ps).executeUpdate();
+        verify(businessPs).setLong(1, 42L);
+        verify(businessPs).setString(2, "Ada");
+        verify(businessPs).setString(3, "Lovelace");
+        verify(businessPs).setString(4, "ada@example.com");
+        verify(businessPs).setString(5, "active");
+        verify(businessPs).setString(6, "2026-07-31T10:15:30Z");
+        verify(businessPs).setString(7, "2026-07-31T10:16:30Z");
+        verify(businessPs).setString(8, "u");
+        verify(businessPs).setLong(9, 1785492930000L);
+        verify(businessPs).setString(10, "tx-1");
+        verify(businessPs).setLong(11, 3L);
+        verify(businessPs).setLong(12, 2L);
+        verify(businessPs).setString(13, "tx-1|3|client.customers|42");
+        verify(businessPs).executeUpdate();
+    }
+
+    @Test
+    void duplicateProcessedEventSkipsBusinessWrite() throws Exception {
+        Connection conn = mock(Connection.class);
+        PreparedStatement processedPs = mock(PreparedStatement.class);
+        when(conn.getAutoCommit()).thenReturn(true);
+        when(conn.prepareStatement(anyString())).thenReturn(processedPs);
+        when(processedPs.executeUpdate()).thenReturn(0);
+
+        Map<String, Object> payload = Map.of(
+                "source_tx_id", "tx-duplicate",
+                "source_tx_total_order", 9
+        );
+
+        LocalLambdaConsumer.processBusinessEvent(
+                conn,
+                "client.customers",
+                "42",
+                payload,
+                () -> {
+                    throw new AssertionError("business write should not run for duplicate idempotency key");
+                }
+        );
+
+        verify(processedPs).setString(1, "tx-duplicate|9|client.customers|42");
+        verify(processedPs).executeUpdate();
+        verify(conn).commit();
+    }
+
+    @Test
+    void idempotencyKeyUsesSourceTransactionOrderTopicAndBusinessKey() {
+        Map<String, Object> payload = Map.of(
+                "source_tx_id", "tx-3",
+                "source_tx_total_order", "12"
+        );
+
+        assertEquals(
+                "tx-3|12|operational.order_items|order_id=99|product_name=Keyboard",
+                LocalLambdaConsumer.idempotencyKey(
+                        payload,
+                        "operational.order_items",
+                        LocalLambdaConsumer.businessKey("order_id", 99, "product_name", "Keyboard")
+                )
+        );
+    }
+
+    @Test
+    void idempotencyKeyUsesUpstreamKeyAndNoTxFallbackForSnapshotRecords() {
+        assertEquals(
+                "no-tx|-1|client.customers|1",
+                LocalLambdaConsumer.idempotencyKey(
+                        Map.of("idempotency_key", "no-tx|-1|client.customers|1"),
+                        "client.customers",
+                        "1"
+                )
+        );
+        assertEquals("no-tx", LocalLambdaConsumer.processedSourceTxId(Map.of()));
     }
 
     @Test

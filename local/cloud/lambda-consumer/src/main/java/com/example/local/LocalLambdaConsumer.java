@@ -44,6 +44,11 @@ public class LocalLambdaConsumer {
     private final String operationalDbUser = requiredEnv("OPERATIONAL_DB_USER");
     private final String operationalDbPassword = requiredEnv("OPERATIONAL_DB_PASSWORD");
 
+    @FunctionalInterface
+    interface BusinessWrite {
+        void apply() throws Exception;
+    }
+
     public static void main(String[] args) throws Exception {
         new LocalLambdaConsumer().run();
     }
@@ -69,6 +74,7 @@ public class LocalLambdaConsumer {
                     Map<String, Object> payload = MAPPER.readValue(record.value(), MAP_TYPE);
                     try {
                         upsert(clientConn, operationalConn, record.topic(), record.partition(), record.offset(), payload);
+                        consumer.commitSync();
                         System.out.printf("processed %s partition=%d offset=%d%n",
                                 record.topic(), record.partition(), record.offset());
                     } catch (Exception e) {
@@ -99,7 +105,8 @@ public class LocalLambdaConsumer {
         props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
         props.put(ConsumerConfig.GROUP_ID_CONFIG, groupId);
         props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
-        props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "true");
+        props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
+        props.put(ConsumerConfig.ISOLATION_LEVEL_CONFIG, "read_committed");
         props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
         props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
 
@@ -159,6 +166,16 @@ public class LocalLambdaConsumer {
                       event_ts TIMESTAMPTZ DEFAULT NOW(),
                       payload JSONB NOT NULL,
                       UNIQUE(topic, kafka_partition, kafka_offset)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS cdc.processed_events (
+                      event_id TEXT PRIMARY KEY,
+                      source_tx_id TEXT NOT NULL,
+                      source_tx_total_order BIGINT,
+                      target_topic TEXT NOT NULL,
+                      target_business_key TEXT NOT NULL,
+                      processed_at TIMESTAMPTZ DEFAULT NOW(),
+                      payload JSONB NOT NULL
                     );
 
                     ALTER TABLE client.customers
@@ -248,6 +265,16 @@ public class LocalLambdaConsumer {
                       UNIQUE(topic, kafka_partition, kafka_offset)
                     );
 
+                    CREATE TABLE IF NOT EXISTS cdc.processed_events (
+                      event_id TEXT PRIMARY KEY,
+                      source_tx_id TEXT NOT NULL,
+                      source_tx_total_order BIGINT,
+                      target_topic TEXT NOT NULL,
+                      target_business_key TEXT NOT NULL,
+                      processed_at TIMESTAMPTZ DEFAULT NOW(),
+                      payload JSONB NOT NULL
+                    );
+
                     ALTER TABLE operational.products
                       ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(255);
 
@@ -279,12 +306,39 @@ public class LocalLambdaConsumer {
                 upsertTransactionMetadata(clientConn, payload);
                 upsertTransactionMetadata(operationalConn, payload);
             }
-            case "client.customers" -> upsertCustomer(clientConn, payload);
-            case "client.addresses" -> upsertAddress(clientConn, payload);
-            case "operational.products" -> upsertProduct(operationalConn, payload);
-            case "operational.orders" -> upsertOrder(operationalConn, payload);
-            case "operational.order_items" -> upsertOrderItem(operationalConn, payload);
-            case "operational.contact_numbers" -> upsertContactNumber(operationalConn, payload);
+            case "client.customers" -> processBusinessEvent(
+                    clientConn, topic, String.valueOf(requiredLong(payload, "id")), payload,
+                    () -> upsertCustomer(clientConn, payload)
+            );
+            case "client.addresses" -> processBusinessEvent(
+                    clientConn, topic, businessKey(
+                            "customer_id", requiredLong(payload, "customer_id"),
+                            "address_type", requiredText(payload, "address_type")
+                    ), payload,
+                    () -> upsertAddress(clientConn, payload)
+            );
+            case "operational.products" -> processBusinessEvent(
+                    operationalConn, topic, requiredText(payload, "name"), payload,
+                    () -> upsertProduct(operationalConn, payload)
+            );
+            case "operational.orders" -> processBusinessEvent(
+                    operationalConn, topic, String.valueOf(requiredLong(payload, "id")), payload,
+                    () -> upsertOrder(operationalConn, payload)
+            );
+            case "operational.order_items" -> processBusinessEvent(
+                    operationalConn, topic, businessKey(
+                            "order_id", requiredLong(payload, "order_id"),
+                            "product_name", requiredText(payload, "product_name")
+                    ), payload,
+                    () -> upsertOrderItem(operationalConn, payload)
+            );
+            case "operational.contact_numbers" -> processBusinessEvent(
+                    operationalConn, topic, businessKey(
+                            "customer_id", requiredLong(payload, "customer_id"),
+                            "phone_type", requiredText(payload, "phone_type")
+                    ), payload,
+                    () -> upsertContactNumber(operationalConn, payload)
+            );
             default -> {
                 Connection eventConn = topic.startsWith("client.") ? clientConn : operationalConn;
                 insertRawEvent(eventConn, topic, partition, offset, payload);
@@ -313,6 +367,9 @@ public class LocalLambdaConsumer {
                     source_tx_total_order = EXCLUDED.source_tx_total_order,
                     source_tx_data_collection_order = EXCLUDED.source_tx_data_collection_order,
                     idempotency_key = EXCLUDED.idempotency_key
+                WHERE client.customers.source_tx_total_order IS NULL
+                   OR EXCLUDED.source_tx_total_order IS NULL
+                   OR EXCLUDED.source_tx_total_order >= client.customers.source_tx_total_order
                 """)) {
             ps.setLong(1, requiredLong(payload, "id"));
             ps.setString(2, requiredText(payload, "first_name"));
@@ -342,6 +399,9 @@ public class LocalLambdaConsumer {
                     source_tx_total_order = EXCLUDED.source_tx_total_order,
                     source_tx_data_collection_order = EXCLUDED.source_tx_data_collection_order,
                     idempotency_key = EXCLUDED.idempotency_key
+                WHERE operational.products.source_tx_total_order IS NULL
+                   OR EXCLUDED.source_tx_total_order IS NULL
+                   OR EXCLUDED.source_tx_total_order >= operational.products.source_tx_total_order
                 """)) {
             ps.setString(1, requiredText(payload, "name"));
             ps.setString(2, optionalText(payload, "category"));
@@ -368,6 +428,9 @@ public class LocalLambdaConsumer {
                     source_tx_total_order = EXCLUDED.source_tx_total_order,
                     source_tx_data_collection_order = EXCLUDED.source_tx_data_collection_order,
                     idempotency_key = EXCLUDED.idempotency_key
+                WHERE operational.orders.source_tx_total_order IS NULL
+                   OR EXCLUDED.source_tx_total_order IS NULL
+                   OR EXCLUDED.source_tx_total_order >= operational.orders.source_tx_total_order
                 """)) {
             ps.setLong(1, requiredLong(payload, "id"));
             ps.setLong(2, requiredLong(payload, "customer_id"));
@@ -395,6 +458,9 @@ public class LocalLambdaConsumer {
                     source_tx_total_order = EXCLUDED.source_tx_total_order,
                     source_tx_data_collection_order = EXCLUDED.source_tx_data_collection_order,
                     idempotency_key = EXCLUDED.idempotency_key
+                WHERE operational.order_items.source_tx_total_order IS NULL
+                   OR EXCLUDED.source_tx_total_order IS NULL
+                   OR EXCLUDED.source_tx_total_order >= operational.order_items.source_tx_total_order
                 """)) {
             ps.setLong(1, requiredLong(payload, "order_id"));
             ps.setString(2, requiredText(payload, "product_name"));
@@ -424,6 +490,9 @@ public class LocalLambdaConsumer {
                     source_tx_total_order = EXCLUDED.source_tx_total_order,
                     source_tx_data_collection_order = EXCLUDED.source_tx_data_collection_order,
                     idempotency_key = EXCLUDED.idempotency_key
+                WHERE client.addresses.source_tx_total_order IS NULL
+                   OR EXCLUDED.source_tx_total_order IS NULL
+                   OR EXCLUDED.source_tx_total_order >= client.addresses.source_tx_total_order
                 """)) {
             ps.setLong(1, requiredLong(payload, "customer_id"));
             ps.setString(2, requiredText(payload, "address_type"));
@@ -451,6 +520,9 @@ public class LocalLambdaConsumer {
                     source_tx_total_order = EXCLUDED.source_tx_total_order,
                     source_tx_data_collection_order = EXCLUDED.source_tx_data_collection_order,
                     idempotency_key = EXCLUDED.idempotency_key
+                WHERE operational.contact_numbers.source_tx_total_order IS NULL
+                   OR EXCLUDED.source_tx_total_order IS NULL
+                   OR EXCLUDED.source_tx_total_order >= operational.contact_numbers.source_tx_total_order
                 """)) {
             ps.setLong(1, requiredLong(payload, "customer_id"));
             ps.setString(2, requiredText(payload, "phone_type"));
@@ -493,6 +565,69 @@ public class LocalLambdaConsumer {
             ps.setString(4, MAPPER.writeValueAsString(payload));
             ps.executeUpdate();
         }
+    }
+
+    static void processBusinessEvent(
+            Connection conn,
+            String topic,
+            String targetBusinessKey,
+            Map<String, Object> payload,
+            BusinessWrite write
+    ) throws Exception {
+        boolean originalAutoCommit = conn.getAutoCommit();
+        try {
+            conn.setAutoCommit(false);
+            if (insertProcessedEvent(conn, topic, targetBusinessKey, payload)) {
+                write.apply();
+            }
+            conn.commit();
+        } catch (Exception e) {
+            conn.rollback();
+            throw e;
+        } finally {
+            conn.setAutoCommit(originalAutoCommit);
+        }
+    }
+
+    static boolean insertProcessedEvent(Connection conn, String topic, String targetBusinessKey, Map<String, Object> payload) throws Exception {
+        try (PreparedStatement ps = conn.prepareStatement("""
+                INSERT INTO cdc.processed_events (
+                    event_id, source_tx_id, source_tx_total_order, target_topic, target_business_key, payload
+                )
+                VALUES (?, ?, ?, ?, ?, ?::jsonb)
+                ON CONFLICT (event_id) DO NOTHING
+                """)) {
+            ps.setString(1, idempotencyKey(payload, topic, targetBusinessKey));
+            ps.setString(2, processedSourceTxId(payload));
+            setNullableLong(ps, 3, optionalLong(payload, "source_tx_total_order"));
+            ps.setString(4, topic);
+            ps.setString(5, targetBusinessKey);
+            ps.setString(6, MAPPER.writeValueAsString(payload));
+            return ps.executeUpdate() == 1;
+        }
+    }
+
+    static String idempotencyKey(Map<String, Object> payload, String targetTopic, String targetBusinessKey) {
+        String upstreamKey = optionalText(payload, "idempotency_key");
+        if (upstreamKey != null && !upstreamKey.isBlank()) {
+            return upstreamKey;
+        }
+        Long sourceTxTotalOrder = optionalLong(payload, "source_tx_total_order");
+        return "%s|%s|%s|%s".formatted(
+                processedSourceTxId(payload),
+                sourceTxTotalOrder == null ? -1L : sourceTxTotalOrder,
+                targetTopic,
+                targetBusinessKey
+        );
+    }
+
+    static String processedSourceTxId(Map<String, Object> payload) {
+        String sourceTxId = optionalText(payload, "source_tx_id");
+        return sourceTxId == null || sourceTxId.isBlank() ? "no-tx" : sourceTxId;
+    }
+
+    static String businessKey(String firstName, Object firstValue, String secondName, Object secondValue) {
+        return "%s=%s|%s=%s".formatted(firstName, firstValue, secondName, secondValue);
     }
 
     private static String requiredEnv(String name) {
