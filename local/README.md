@@ -166,6 +166,7 @@ docker compose -f examples/legacy-single-stack-poc/docker-compose.yml down -v
 Implemented locally:
 
 - PostgreSQL source configured for logical replication.
+- Source inventory tables use `REPLICA IDENTITY FULL` so Debezium has full update/delete row content.
 - Seed `inventory.customers` table.
 - Debezium replication user.
 - Kafka and Zookeeper.
@@ -180,9 +181,7 @@ Not implemented yet:
 
 - Schema registry.
 - DLQ topics.
-- Automated test assertions.
-- MirrorMaker2 to AWS MSK from the local stack.
-- Source LSN and transaction ID extraction into target projection.
+- MirrorMaker2 to AWS MSK from the local stack. The split local deployment mirrors to a local cloud replacement Kafka instead.
 
 ## Two-Compose Local Migration Deployment
 
@@ -204,6 +203,43 @@ The split flow also carries Debezium transaction metadata:
 - Each derived data topic includes `source_record_type`, `source_ts_ms`, `source_tx_id`, `idempotency_key`, `source_tx_total_order`, and `source_tx_data_collection_order`.
 - Each destination business table stores those same source metadata columns.
 - `cdc.transaction_metadata` stores transaction `BEGIN` and `END` rows with `event_count`, `data_collections`, and `ts_ms` for consistency checks and orchestration.
+- `cdc.processed_events` stores the unique destination idempotency key for every accepted business event.
+
+The local source-side Flink jobs use Kafka exactly-once sink settings for business topics:
+
+- Kafka consumers read with `properties.isolation.level = read_committed`.
+- Kafka producers use `enable.idempotence=true`, `acks=all`, retries enabled, and `max.in.flight.requests.per.connection=5`.
+- Upsert Kafka sinks use `sink.delivery-guarantee = exactly-once` with stable local transactional ID prefixes.
+
+MirrorMaker2 is configured for the local Kafka 3.5+ exactly-once source support path:
+
+- `target.exactly.once.source.support = enabled`
+- `dedicated.mode.enable.internal.rest = true`
+- `source.consumer.isolation.level = read_committed`
+
+The local Kafka brokers raise `transaction.max.timeout.ms` through `KAFKA_TRANSACTION_MAX_TIMEOUT_MS` so Flink's exactly-once Kafka producers can initialize.
+
+Destination writes are gated by `cdc.processed_events`:
+
+```text
+BEGIN
+INSERT INTO cdc.processed_events(event_id, ...)
+  ON CONFLICT (event_id) DO NOTHING
+UPSERT business row only when the processed-event insert succeeds
+COMMIT
+```
+
+The event id is the composite key carried by the derived topics:
+
+```text
+event_id =
+  source_tx_id
+  + source_tx_total_order
+  + target_topic
+  + target_business_key
+```
+
+Snapshot records that do not have Debezium transaction metadata use `no-tx` and `-1` in the generated idempotency key. Destination business upserts also compare `source_tx_total_order` before updating, so older source events cannot overwrite newer destination state.
 
 Files:
 
@@ -248,6 +284,21 @@ Reset both local compose stacks and run from a blank slate:
 RESET=1 ./local/scripts/run-local-e2e.sh
 ```
 
+The reset E2E test prints the destination `cdc.processed_events` rows after the business and transaction metadata samples. Typical output includes transaction-backed rows like:
+
+```text
+757:26667776|1|client.customers|786578049
+758:26668488|1|operational.contact_numbers|customer_id=786578049|phone_type=HOME
+759:26669336|1|operational.orders|786576049
+```
+
+It also includes snapshot rows with no source transaction:
+
+```text
+no-tx|-1|client.customers|1
+no-tx|-1|operational.orders|5001
+```
+
 Run component checks separately after the local stack is up:
 
 ```bash
@@ -285,6 +336,15 @@ docker exec -it local-cloud-client-postgres psql -U appuser -d clientdb \
       ORDER BY table_name;"
 ```
 
+Verify client processed events:
+
+```bash
+docker exec -it local-cloud-client-postgres psql -U appuser -d clientdb \
+  -c "SELECT event_id, source_tx_id, source_tx_total_order, target_topic, target_business_key, processed_at
+      FROM cdc.processed_events
+      ORDER BY processed_at, target_topic, target_business_key;"
+```
+
 Verify operational PostgreSQL:
 
 ```bash
@@ -294,6 +354,15 @@ docker exec -it local-cloud-operational-postgres psql -U appuser -d operationald
       UNION ALL SELECT 'order_items', count(*) FROM operational.order_items
       UNION ALL SELECT 'contact_numbers', count(*) FROM operational.contact_numbers
       ORDER BY table_name;"
+```
+
+Verify operational processed events:
+
+```bash
+docker exec -it local-cloud-operational-postgres psql -U appuser -d operationaldb \
+  -c "SELECT event_id, source_tx_id, source_tx_total_order, target_topic, target_business_key, processed_at
+      FROM cdc.processed_events
+      ORDER BY processed_at, target_topic, target_business_key;"
 ```
 
 Stop the split local deployment:
