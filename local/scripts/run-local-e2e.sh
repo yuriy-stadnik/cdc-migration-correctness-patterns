@@ -140,6 +140,7 @@ echo "Cloud client counts:"
 docker exec -i local-cloud-client-postgres psql -U appuser -d clientdb <<'SQL'
 SELECT 'customers' AS table_name, count(*) FROM client.customers
 UNION ALL SELECT 'addresses', count(*) FROM client.addresses
+UNION ALL SELECT 'postponed_fk_events', count(*) FROM cdc.postponed_fk_events
 UNION ALL SELECT 'transaction_metadata', count(*) FROM cdc.transaction_metadata
 ORDER BY table_name;
 SQL
@@ -150,20 +151,28 @@ SELECT 'products' AS table_name, count(*) FROM operational.products
 UNION ALL SELECT 'orders', count(*) FROM operational.orders
 UNION ALL SELECT 'order_items', count(*) FROM operational.order_items
 UNION ALL SELECT 'contact_numbers', count(*) FROM operational.contact_numbers
+UNION ALL SELECT 'postponed_fk_events', count(*) FROM cdc.postponed_fk_events
 UNION ALL SELECT 'transaction_metadata', count(*) FROM cdc.transaction_metadata
 ORDER BY table_name;
 SQL
 
 echo "Cloud client sample:"
 docker exec -i local-cloud-client-postgres psql -U appuser -d clientdb -c \
-  "SELECT c.id AS customer_id, c.first_name, c.last_name, a.street, a.city, c.source_record_type, c.source_tx_id
+  "SELECT c.id AS customer_id, c.first_name, c.last_name, a.street, a.city,
+          c.source_record_type, c.source_tx_id,
+          c.idempotency_key AS customer_idempotency_key,
+          a.idempotency_key AS address_idempotency_key
    FROM client.customers c
    JOIN client.addresses a ON a.customer_id = c.id
    WHERE c.id = ${CUSTOMER_ID};"
 
 echo "Cloud order sample:"
 docker exec -i local-cloud-operational-postgres psql -U appuser -d operationaldb -c \
-  "SELECT o.id AS order_id, o.customer_id, p.name AS product, oi.quantity, oi.price_at_purchase, o.source_record_type, o.source_tx_id
+  "SELECT o.id AS order_id, o.customer_id, p.name AS product, oi.quantity, oi.price_at_purchase,
+          o.source_record_type, o.source_tx_id,
+          o.idempotency_key AS order_idempotency_key,
+          oi.idempotency_key AS order_item_idempotency_key,
+          p.idempotency_key AS product_idempotency_key
    FROM operational.orders o
    JOIN operational.order_items oi ON oi.order_id = o.id
    JOIN operational.products p ON p.name = oi.product_name
@@ -183,15 +192,27 @@ docker exec -i local-cloud-client-postgres psql -U appuser -d clientdb -c \
    FROM cdc.processed_events
    ORDER BY processed_at, target_topic, target_business_key;"
 
+echo "Cloud client postponed_fk_events:"
+docker exec -i local-cloud-client-postgres psql -U appuser -d clientdb -c \
+  "SELECT event_id, fk_name, parent_schema, parent_table, target_topic, status, retry_count, updated_at
+   FROM cdc.postponed_fk_events
+   ORDER BY updated_at, event_id;"
+
 echo "Cloud operational processed_events:"
 docker exec -i local-cloud-operational-postgres psql -U appuser -d operationaldb -c \
   "SELECT event_id, source_tx_id, source_tx_total_order, target_topic, target_business_key, processed_at
    FROM cdc.processed_events
    ORDER BY processed_at, target_topic, target_business_key;"
 
+echo "Cloud operational postponed_fk_events:"
+docker exec -i local-cloud-operational-postgres psql -U appuser -d operationaldb -c \
+  "SELECT event_id, fk_name, parent_schema, parent_table, target_topic, status, retry_count, updated_at
+   FROM cdc.postponed_fk_events
+   ORDER BY updated_at, event_id;"
+
 echo "Cloud contact sample:"
 docker exec -i local-cloud-operational-postgres psql -U appuser -d operationaldb -c \
-  "SELECT customer_id, phone_type, phone_number
+  "SELECT customer_id, phone_type, phone_number, idempotency_key
    FROM operational.contact_numbers
    WHERE customer_id = ${CUSTOMER_ID}
    ORDER BY phone_type;"
