@@ -11,7 +11,9 @@ import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
-import java.sql.Statement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Savepoint;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.List;
@@ -49,6 +51,14 @@ public class LocalLambdaConsumer {
         void apply() throws Exception;
     }
 
+    record ChildDependency(
+            String fkName,
+            String childSchema,
+            String childTable,
+            String parentSchema,
+            String parentTable
+    ) {}
+
     public static void main(String[] args) throws Exception {
         new LocalLambdaConsumer().run();
     }
@@ -61,8 +71,6 @@ public class LocalLambdaConsumer {
                 Connection operationalConn = waitForDb("operational", operationalJdbcUrl, operationalDbUser, operationalDbPassword);
                 KafkaConsumer<String, String> consumer = waitForConsumer()
         ) {
-            ensureClientSchema(clientConn);
-            ensureOperationalSchema(operationalConn);
             consumer.subscribe(topics);
 
             while (true) {
@@ -120,186 +128,6 @@ public class LocalLambdaConsumer {
         }
     }
 
-    private void ensureClientSchema(Connection conn) throws Exception {
-        try (Statement st = conn.createStatement()) {
-            st.execute("""
-                    CREATE SCHEMA IF NOT EXISTS client;
-                    CREATE SCHEMA IF NOT EXISTS cdc;
-
-                    CREATE TABLE IF NOT EXISTS client.customers (
-                      id BIGINT PRIMARY KEY,
-                      first_name TEXT NOT NULL,
-                      last_name TEXT NOT NULL,
-                      email TEXT,
-                      status TEXT,
-                      created_at TIMESTAMPTZ,
-                      updated_at TIMESTAMPTZ,
-                      source_record_type TEXT,
-                      source_ts_ms BIGINT,
-                      source_tx_id TEXT,
-                      idempotency_key VARCHAR(255),
-                      source_tx_total_order BIGINT,
-                      source_tx_data_collection_order BIGINT
-                    );
-
-                    CREATE TABLE IF NOT EXISTS client.addresses (
-                      customer_id BIGINT NOT NULL,
-                      address_type TEXT NOT NULL,
-                      street TEXT,
-                      city TEXT,
-                      state TEXT,
-                      zip_code TEXT,
-                      source_record_type TEXT,
-                      source_ts_ms BIGINT,
-                      source_tx_id TEXT,
-                      idempotency_key VARCHAR(255),
-                      source_tx_total_order BIGINT,
-                      source_tx_data_collection_order BIGINT,
-                      PRIMARY KEY (customer_id, address_type)
-                    );
-
-                    CREATE TABLE IF NOT EXISTS client.events (
-                      id BIGSERIAL PRIMARY KEY,
-                      topic TEXT NOT NULL,
-                      kafka_partition INTEGER NOT NULL,
-                      kafka_offset BIGINT NOT NULL,
-                      event_ts TIMESTAMPTZ DEFAULT NOW(),
-                      payload JSONB NOT NULL,
-                      UNIQUE(topic, kafka_partition, kafka_offset)
-                    );
-
-                    CREATE TABLE IF NOT EXISTS cdc.processed_events (
-                      event_id TEXT PRIMARY KEY,
-                      source_tx_id TEXT NOT NULL,
-                      source_tx_total_order BIGINT,
-                      target_topic TEXT NOT NULL,
-                      target_business_key TEXT NOT NULL,
-                      processed_at TIMESTAMPTZ DEFAULT NOW(),
-                      payload JSONB NOT NULL
-                    );
-
-                    ALTER TABLE client.customers
-                      ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(255);
-
-                    ALTER TABLE client.addresses
-                      ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(255);
-
-                    CREATE TABLE IF NOT EXISTS cdc.transaction_metadata (
-                      tx_id TEXT NOT NULL,
-                      status TEXT NOT NULL,
-                      event_count BIGINT,
-                      data_collections JSONB,
-                      ts_ms BIGINT,
-                      updated_at TIMESTAMPTZ DEFAULT NOW(),
-                      PRIMARY KEY (tx_id, status)
-                    );
-                    """);
-        }
-    }
-
-    private void ensureOperationalSchema(Connection conn) throws Exception {
-        try (Statement st = conn.createStatement()) {
-            st.execute("""
-                    CREATE SCHEMA IF NOT EXISTS operational;
-                    CREATE SCHEMA IF NOT EXISTS cdc;
-
-                    CREATE TABLE IF NOT EXISTS operational.products (
-                      name TEXT PRIMARY KEY,
-                      category TEXT,
-                      current_price DECIMAL(10,2),
-                      source_record_type TEXT,
-                      source_ts_ms BIGINT,
-                      source_tx_id TEXT,
-                      idempotency_key VARCHAR(255),
-                      source_tx_total_order BIGINT,
-                      source_tx_data_collection_order BIGINT
-                    );
-
-                    CREATE TABLE IF NOT EXISTS operational.orders (
-                      id BIGINT PRIMARY KEY,
-                      customer_id BIGINT,
-                      order_date TIMESTAMPTZ,
-                      status TEXT,
-                      source_record_type TEXT,
-                      source_ts_ms BIGINT,
-                      source_tx_id TEXT,
-                      idempotency_key VARCHAR(255),
-                      source_tx_total_order BIGINT,
-                      source_tx_data_collection_order BIGINT
-                    );
-
-                    CREATE TABLE IF NOT EXISTS operational.order_items (
-                      order_id BIGINT NOT NULL,
-                      product_name TEXT NOT NULL,
-                      quantity INTEGER,
-                      price_at_purchase DECIMAL(10,2),
-                      source_record_type TEXT,
-                      source_ts_ms BIGINT,
-                      source_tx_id TEXT,
-                      idempotency_key VARCHAR(255),
-                      source_tx_total_order BIGINT,
-                      source_tx_data_collection_order BIGINT,
-                      PRIMARY KEY (order_id, product_name)
-                    );
-
-                    CREATE TABLE IF NOT EXISTS operational.contact_numbers (
-                      customer_id BIGINT NOT NULL,
-                      phone_type TEXT NOT NULL,
-                      phone_number TEXT NOT NULL,
-                      source_record_type TEXT,
-                      source_ts_ms BIGINT,
-                      source_tx_id TEXT,
-                      idempotency_key VARCHAR(255),
-                      source_tx_total_order BIGINT,
-                      source_tx_data_collection_order BIGINT,
-                      PRIMARY KEY (customer_id, phone_type)
-                    );
-
-                    CREATE TABLE IF NOT EXISTS operational.events (
-                      id BIGSERIAL PRIMARY KEY,
-                      topic TEXT NOT NULL,
-                      kafka_partition INTEGER NOT NULL,
-                      kafka_offset BIGINT NOT NULL,
-                      event_ts TIMESTAMPTZ DEFAULT NOW(),
-                      payload JSONB NOT NULL,
-                      UNIQUE(topic, kafka_partition, kafka_offset)
-                    );
-
-                    CREATE TABLE IF NOT EXISTS cdc.processed_events (
-                      event_id TEXT PRIMARY KEY,
-                      source_tx_id TEXT NOT NULL,
-                      source_tx_total_order BIGINT,
-                      target_topic TEXT NOT NULL,
-                      target_business_key TEXT NOT NULL,
-                      processed_at TIMESTAMPTZ DEFAULT NOW(),
-                      payload JSONB NOT NULL
-                    );
-
-                    ALTER TABLE operational.products
-                      ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(255);
-
-                    ALTER TABLE operational.orders
-                      ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(255);
-
-                    ALTER TABLE operational.order_items
-                      ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(255);
-
-                    ALTER TABLE operational.contact_numbers
-                      ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(255);
-
-                    CREATE TABLE IF NOT EXISTS cdc.transaction_metadata (
-                      tx_id TEXT NOT NULL,
-                      status TEXT NOT NULL,
-                      event_count BIGINT,
-                      data_collections JSONB,
-                      ts_ms BIGINT,
-                      updated_at TIMESTAMPTZ DEFAULT NOW(),
-                      PRIMARY KEY (tx_id, status)
-                    );
-                    """);
-        }
-    }
-
     static void upsert(Connection clientConn, Connection operationalConn, String topic, int partition, long offset, Map<String, Object> payload) throws Exception {
         switch (topic) {
             case "pg1.transaction" -> {
@@ -308,36 +136,60 @@ public class LocalLambdaConsumer {
             }
             case "client.customers" -> processBusinessEvent(
                     clientConn, topic, String.valueOf(requiredLong(payload, "id")), payload,
-                    () -> upsertCustomer(clientConn, payload)
+                    null,
+                    () -> upsertCustomer(clientConn, payload),
+                    () -> retryPendingChildren(clientConn, "client", "customers")
             );
             case "client.addresses" -> processBusinessEvent(
                     clientConn, topic, businessKey(
                             "customer_id", requiredLong(payload, "customer_id"),
                             "address_type", requiredText(payload, "address_type")
                     ), payload,
-                    () -> upsertAddress(clientConn, payload)
+                    new ChildDependency(
+                            "fk__client.addresses__client.customers",
+                            "client",
+                            "addresses",
+                            "client",
+                            "customers"
+                    ),
+                    () -> upsertAddress(clientConn, payload),
+                    null
             );
             case "operational.products" -> processBusinessEvent(
                     operationalConn, topic, requiredText(payload, "name"), payload,
-                    () -> upsertProduct(operationalConn, payload)
+                    null,
+                    () -> upsertProduct(operationalConn, payload),
+                    () -> retryPendingChildren(operationalConn, "operational", "products")
             );
             case "operational.orders" -> processBusinessEvent(
                     operationalConn, topic, String.valueOf(requiredLong(payload, "id")), payload,
-                    () -> upsertOrder(operationalConn, payload)
+                    null,
+                    () -> upsertOrder(operationalConn, payload),
+                    () -> retryPendingChildren(operationalConn, "operational", "orders")
             );
             case "operational.order_items" -> processBusinessEvent(
                     operationalConn, topic, businessKey(
                             "order_id", requiredLong(payload, "order_id"),
                             "product_name", requiredText(payload, "product_name")
                     ), payload,
-                    () -> upsertOrderItem(operationalConn, payload)
+                    new ChildDependency(
+                            "fk__operational.order_items__operational.orders",
+                            "operational",
+                            "order_items",
+                            "operational",
+                            "orders"
+                    ),
+                    () -> upsertOrderItem(operationalConn, payload),
+                    null
             );
             case "operational.contact_numbers" -> processBusinessEvent(
                     operationalConn, topic, businessKey(
                             "customer_id", requiredLong(payload, "customer_id"),
                             "phone_type", requiredText(payload, "phone_type")
                     ), payload,
-                    () -> upsertContactNumber(operationalConn, payload)
+                    null,
+                    () -> upsertContactNumber(operationalConn, payload),
+                    null
             );
             default -> {
                 Connection eventConn = topic.startsWith("client.") ? clientConn : operationalConn;
@@ -572,13 +424,28 @@ public class LocalLambdaConsumer {
             String topic,
             String targetBusinessKey,
             Map<String, Object> payload,
-            BusinessWrite write
+            ChildDependency dependency,
+            BusinessWrite write,
+            BusinessWrite afterWrite
     ) throws Exception {
         boolean originalAutoCommit = conn.getAutoCommit();
         try {
             conn.setAutoCommit(false);
             if (insertProcessedEvent(conn, topic, targetBusinessKey, payload)) {
-                write.apply();
+                Savepoint businessSavepoint = conn.setSavepoint("business_write");
+                try {
+                    write.apply();
+                    conn.releaseSavepoint(businessSavepoint);
+                } catch (SQLException e) {
+                    if (!isForeignKeyViolation(e) || dependency == null) {
+                        throw e;
+                    }
+                    conn.rollback(businessSavepoint);
+                    postponeForeignKeyEvent(conn, topic, targetBusinessKey, payload, resolveDependency(topic, e, dependency), e);
+                }
+            }
+            if (afterWrite != null) {
+                afterWrite.apply();
             }
             conn.commit();
         } catch (Exception e) {
@@ -587,6 +454,16 @@ public class LocalLambdaConsumer {
         } finally {
             conn.setAutoCommit(originalAutoCommit);
         }
+    }
+
+    static void processBusinessEvent(
+            Connection conn,
+            String topic,
+            String targetBusinessKey,
+            Map<String, Object> payload,
+            BusinessWrite write
+    ) throws Exception {
+        processBusinessEvent(conn, topic, targetBusinessKey, payload, null, write, null);
     }
 
     static boolean insertProcessedEvent(Connection conn, String topic, String targetBusinessKey, Map<String, Object> payload) throws Exception {
@@ -605,6 +482,205 @@ public class LocalLambdaConsumer {
             ps.setString(6, MAPPER.writeValueAsString(payload));
             return ps.executeUpdate() == 1;
         }
+    }
+
+    static void postponeForeignKeyEvent(
+            Connection conn,
+            String topic,
+            String targetBusinessKey,
+            Map<String, Object> payload,
+            ChildDependency dependency,
+            SQLException error
+    ) throws Exception {
+        try (PreparedStatement ps = conn.prepareStatement("""
+                INSERT INTO cdc.postponed_fk_events (
+                    event_id, fk_name, child_schema, child_table, parent_schema, parent_table,
+                    target_topic, target_business_key, payload, error_message, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, NOW())
+                ON CONFLICT (event_id) DO UPDATE
+                SET fk_name = EXCLUDED.fk_name,
+                    child_schema = EXCLUDED.child_schema,
+                    child_table = EXCLUDED.child_table,
+                    parent_schema = EXCLUDED.parent_schema,
+                    parent_table = EXCLUDED.parent_table,
+                    target_topic = EXCLUDED.target_topic,
+                    target_business_key = EXCLUDED.target_business_key,
+                    payload = EXCLUDED.payload,
+                    error_message = EXCLUDED.error_message,
+                    status = 'PENDING',
+                    updated_at = NOW()
+                """)) {
+            ps.setString(1, idempotencyKey(payload, topic, targetBusinessKey));
+            ps.setString(2, dependency.fkName());
+            ps.setString(3, dependency.childSchema());
+            ps.setString(4, dependency.childTable());
+            ps.setString(5, dependency.parentSchema());
+            ps.setString(6, dependency.parentTable());
+            ps.setString(7, topic);
+            ps.setString(8, targetBusinessKey);
+            ps.setString(9, MAPPER.writeValueAsString(payload));
+            ps.setString(10, error.getMessage());
+            ps.executeUpdate();
+        }
+    }
+
+    static void retryPendingChildren(Connection conn, String parentSchema, String parentTable) throws Exception {
+        try (PreparedStatement ps = conn.prepareStatement("""
+                SELECT event_id, target_topic, payload::text
+                FROM cdc.postponed_fk_events
+                WHERE status = 'PENDING'
+                  AND parent_schema = ?
+                  AND parent_table = ?
+                ORDER BY created_at
+                FOR UPDATE
+                """)) {
+            ps.setString(1, parentSchema);
+            ps.setString(2, parentTable);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String eventId = rs.getString("event_id");
+                    String topic = rs.getString("target_topic");
+                    Map<String, Object> payload = MAPPER.readValue(rs.getString("payload"), MAP_TYPE);
+                    retryPendingChild(conn, eventId, topic, payload);
+                }
+            }
+        }
+    }
+
+    static void retryPendingChild(Connection conn, String eventId, String topic, Map<String, Object> payload) throws Exception {
+        Savepoint retrySavepoint = conn.setSavepoint("retry_pending_child");
+        try {
+            upsertPendingChild(topic, conn, payload);
+            markPendingChildApplied(conn, eventId);
+            conn.releaseSavepoint(retrySavepoint);
+        } catch (SQLException e) {
+            if (!isForeignKeyViolation(e)) {
+                throw e;
+            }
+            conn.rollback(retrySavepoint);
+            markPendingChildRetry(conn, eventId, resolveDependency(topic, e, fallbackDependency(topic)), e);
+        }
+    }
+
+    static void upsertPendingChild(String topic, Connection conn, Map<String, Object> payload) throws Exception {
+        switch (topic) {
+            case "client.addresses" -> upsertAddress(conn, payload);
+            case "operational.order_items" -> upsertOrderItem(conn, payload);
+            default -> throw new IllegalArgumentException("Unsupported postponed FK topic: " + topic);
+        }
+    }
+
+    static void markPendingChildApplied(Connection conn, String eventId) throws Exception {
+        try (PreparedStatement ps = conn.prepareStatement("""
+                UPDATE cdc.postponed_fk_events
+                SET status = 'APPLIED',
+                    updated_at = NOW(),
+                    last_retry_at = NOW()
+                WHERE event_id = ?
+                """)) {
+            ps.setString(1, eventId);
+            ps.executeUpdate();
+        }
+    }
+
+    static void markPendingChildRetry(Connection conn, String eventId, ChildDependency dependency, SQLException error) throws Exception {
+        try (PreparedStatement ps = conn.prepareStatement("""
+                UPDATE cdc.postponed_fk_events
+                SET retry_count = retry_count + 1,
+                    fk_name = ?,
+                    child_schema = ?,
+                    child_table = ?,
+                    parent_schema = ?,
+                    parent_table = ?,
+                    error_message = ?,
+                    updated_at = NOW(),
+                    last_retry_at = NOW()
+                WHERE event_id = ?
+                """)) {
+            ps.setString(1, dependency.fkName());
+            ps.setString(2, dependency.childSchema());
+            ps.setString(3, dependency.childTable());
+            ps.setString(4, dependency.parentSchema());
+            ps.setString(5, dependency.parentTable());
+            ps.setString(6, error.getMessage());
+            ps.setString(7, eventId);
+            ps.executeUpdate();
+        }
+    }
+
+    static boolean isForeignKeyViolation(SQLException error) {
+        SQLException current = error;
+        while (current != null) {
+            if ("23503".equals(current.getSQLState())) {
+                return true;
+            }
+            current = current.getNextException();
+        }
+        return false;
+    }
+
+    static ChildDependency resolveDependency(String topic, SQLException error, ChildDependency fallback) {
+        String fkName = foreignKeyName(error);
+        if (fkName == null || !fkName.startsWith("fk__")) {
+            return fallback;
+        }
+        String[] sides = fkName.substring(4).split("__", 2);
+        if (sides.length != 2) {
+            return fallback;
+        }
+        String[] child = sides[0].split("[.]", 2);
+        String[] parent = sides[1].split("[.]", 2);
+        if (child.length != 2 || parent.length != 2) {
+            return fallback;
+        }
+        return new ChildDependency(fkName, child[0], child[1], parent[0], parent[1]);
+    }
+
+    static ChildDependency fallbackDependency(String topic) {
+        return switch (topic) {
+            case "client.addresses" -> new ChildDependency(
+                    "fk__client.addresses__client.customers",
+                    "client",
+                    "addresses",
+                    "client",
+                    "customers"
+            );
+            case "operational.order_items" -> new ChildDependency(
+                    "fk__operational.order_items__operational.orders",
+                    "operational",
+                    "order_items",
+                    "operational",
+                    "orders"
+            );
+            default -> new ChildDependency("unknown", "unknown", "unknown", "unknown", "unknown");
+        };
+    }
+
+    static String foreignKeyName(SQLException error) {
+        SQLException current = error;
+        while (current != null) {
+            String fkName = foreignKeyName(current.getMessage());
+            if (fkName != null) {
+                return fkName;
+            }
+            current = current.getNextException();
+        }
+        return null;
+    }
+
+    static String foreignKeyName(String message) {
+        if (message == null) {
+            return null;
+        }
+        String marker = "foreign key constraint \"";
+        int start = message.indexOf(marker);
+        if (start < 0) {
+            return null;
+        }
+        int nameStart = start + marker.length();
+        int nameEnd = message.indexOf('"', nameStart);
+        return nameEnd < 0 ? null : message.substring(nameStart, nameEnd);
     }
 
     static String idempotencyKey(Map<String, Object> payload, String targetTopic, String targetBusinessKey) {

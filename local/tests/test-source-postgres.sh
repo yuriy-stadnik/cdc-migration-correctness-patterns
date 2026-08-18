@@ -31,4 +31,14 @@ if [ "$actual_replica_identity_full" != "3" ]; then
   exit 1
 fi
 
+source_fk_count="$(
+  docker exec -i local-source-postgres psql -U postgres -d appdb -tAc \
+    "SELECT count(*) FROM information_schema.table_constraints WHERE table_schema = 'inventory' AND constraint_type = 'FOREIGN KEY' AND constraint_name IN ('fk__inventory.accounts__inventory.customers', 'fk__inventory.orders_flat__inventory.customers')" \
+    | tr -d '[:space:]'
+)"
+if [ "$source_fk_count" != "2" ]; then
+  echo "Expected source foreign keys from accounts/orders_flat to customers" >&2
+  exit 1
+fi
+
 echo "source-postgres: ok"

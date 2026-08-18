@@ -62,8 +62,11 @@ resource "aws_iam_role_policy" "ec2_inline" {
           "kafka-cluster:DescribeCluster",
           "kafka-cluster:DescribeClusterV2",
           "kafka-cluster:DescribeClusterDynamicConfiguration",
+          "kafka-cluster:WriteDataIdempotently",
           "kafka-cluster:DescribeTopic",
           "kafka-cluster:DescribeGroup",
+          "kafka-cluster:DescribeTransactionalId",
+          "kafka-cluster:AlterTransactionalId",
 
           # Needed for MM2 / Connect internal topics
           "kafka-cluster:CreateTopic",

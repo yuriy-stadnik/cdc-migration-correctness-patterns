@@ -34,6 +34,16 @@ CREATE TABLE IF NOT EXISTS inventory.orders_flat (
   total_price DECIMAL(10,2)
 );
 
+ALTER TABLE inventory.accounts
+  DROP CONSTRAINT IF EXISTS "fk__inventory.accounts__inventory.customers",
+  ADD CONSTRAINT "fk__inventory.accounts__inventory.customers"
+    FOREIGN KEY (customer_id) REFERENCES inventory.customers(id);
+
+ALTER TABLE inventory.orders_flat
+  DROP CONSTRAINT IF EXISTS "fk__inventory.orders_flat__inventory.customers",
+  ADD CONSTRAINT "fk__inventory.orders_flat__inventory.customers"
+    FOREIGN KEY (customer_id) REFERENCES inventory.customers(id);
+
 ALTER TABLE inventory.customers REPLICA IDENTITY FULL;
 ALTER TABLE inventory.accounts REPLICA IDENTITY FULL;
 ALTER TABLE inventory.orders_flat REPLICA IDENTITY FULL;

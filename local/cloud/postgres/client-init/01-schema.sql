@@ -30,7 +30,9 @@ CREATE TABLE IF NOT EXISTS client.addresses (
   idempotency_key VARCHAR(255),
   source_tx_total_order BIGINT,
   source_tx_data_collection_order BIGINT,
-  PRIMARY KEY (customer_id, address_type)
+  PRIMARY KEY (customer_id, address_type),
+  CONSTRAINT "fk__client.addresses__client.customers"
+    FOREIGN KEY (customer_id) REFERENCES client.customers(id)
 );
 
 CREATE TABLE IF NOT EXISTS client.events (
@@ -51,6 +53,24 @@ CREATE TABLE IF NOT EXISTS cdc.processed_events (
   target_business_key TEXT NOT NULL,
   processed_at TIMESTAMPTZ DEFAULT NOW(),
   payload JSONB NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS cdc.postponed_fk_events (
+  event_id TEXT PRIMARY KEY,
+  fk_name TEXT NOT NULL,
+  child_schema TEXT NOT NULL,
+  child_table TEXT NOT NULL,
+  parent_schema TEXT NOT NULL,
+  parent_table TEXT NOT NULL,
+  target_topic TEXT NOT NULL,
+  target_business_key TEXT NOT NULL,
+  payload JSONB NOT NULL,
+  error_message TEXT,
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'PENDING',
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  last_retry_at TIMESTAMPTZ
 );
 
 CREATE TABLE IF NOT EXISTS cdc.transaction_metadata (

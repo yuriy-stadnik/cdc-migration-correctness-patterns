@@ -6,6 +6,9 @@ import org.mockito.ArgumentCaptor;
 import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Savepoint;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -27,9 +30,15 @@ class LocalLambdaConsumerTest {
         Connection operationalConn = mock(Connection.class);
         PreparedStatement processedPs = mock(PreparedStatement.class);
         PreparedStatement businessPs = mock(PreparedStatement.class);
+        PreparedStatement pendingSelectPs = mock(PreparedStatement.class);
+        ResultSet pendingRows = mock(ResultSet.class);
+        Savepoint savepoint = mock(Savepoint.class);
         when(clientConn.getAutoCommit()).thenReturn(true);
-        when(clientConn.prepareStatement(anyString())).thenReturn(processedPs, businessPs);
+        when(clientConn.setSavepoint(anyString())).thenReturn(savepoint);
+        when(clientConn.prepareStatement(anyString())).thenReturn(processedPs, businessPs, pendingSelectPs);
         when(processedPs.executeUpdate()).thenReturn(1);
+        when(pendingSelectPs.executeQuery()).thenReturn(pendingRows);
+        when(pendingRows.next()).thenReturn(false);
 
         Map<String, Object> payload = Map.ofEntries(
                 Map.entry("id", "42"),
@@ -55,6 +64,7 @@ class LocalLambdaConsumerTest {
         verify(processedPs).setString(4, "client.customers");
         verify(processedPs).setString(5, "42");
         verify(processedPs).executeUpdate();
+        verify(clientConn).releaseSavepoint(savepoint);
         verify(clientConn).commit();
         verify(clientConn).setAutoCommit(false);
         verify(clientConn).setAutoCommit(true);
@@ -101,6 +111,78 @@ class LocalLambdaConsumerTest {
         verify(processedPs).setString(1, "tx-duplicate|9|client.customers|42");
         verify(processedPs).executeUpdate();
         verify(conn).commit();
+    }
+
+    @Test
+    void foreignKeyViolationIsBufferedWithoutFailingTransaction() throws Exception {
+        Connection conn = mock(Connection.class);
+        PreparedStatement processedPs = mock(PreparedStatement.class);
+        PreparedStatement pendingPs = mock(PreparedStatement.class);
+        Savepoint savepoint = mock(Savepoint.class);
+        SQLException fkError = new SQLException(
+                "ERROR: insert or update on table \"addresses\" violates foreign key constraint \"fk__client.addresses__client.customers\"",
+                "23503"
+        );
+        when(conn.getAutoCommit()).thenReturn(true);
+        when(conn.setSavepoint(anyString())).thenReturn(savepoint);
+        when(conn.prepareStatement(anyString())).thenReturn(processedPs, pendingPs);
+        when(processedPs.executeUpdate()).thenReturn(1);
+
+        Map<String, Object> payload = Map.of(
+                "customer_id", 42,
+                "address_type", "HOME",
+                "source_tx_id", "tx-4",
+                "source_tx_total_order", 5,
+                "idempotency_key", "tx-4|5|client.addresses|customer_id=42|address_type=HOME"
+        );
+
+        LocalLambdaConsumer.processBusinessEvent(
+                conn,
+                "client.addresses",
+                "customer_id=42|address_type=HOME",
+                payload,
+                new LocalLambdaConsumer.ChildDependency(
+                        "fk__client.addresses__client.customers",
+                        "client",
+                        "addresses",
+                        "client",
+                        "customers"
+                ),
+                () -> {
+                    throw fkError;
+                },
+                null
+        );
+
+        verify(conn).rollback(savepoint);
+        verify(pendingPs).setString(1, "tx-4|5|client.addresses|customer_id=42|address_type=HOME");
+        verify(pendingPs).setString(2, "fk__client.addresses__client.customers");
+        verify(pendingPs).setString(3, "client");
+        verify(pendingPs).setString(4, "addresses");
+        verify(pendingPs).setString(5, "client");
+        verify(pendingPs).setString(6, "customers");
+        verify(pendingPs).executeUpdate();
+        verify(conn).commit();
+    }
+
+    @Test
+    void parseForeignKeyNameAndDependencySides() {
+        SQLException fkError = new SQLException(
+                "violates foreign key constraint \"fk__operational.order_items__operational.products\"",
+                "23503"
+        );
+
+        LocalLambdaConsumer.ChildDependency dependency = LocalLambdaConsumer.resolveDependency(
+                "operational.order_items",
+                fkError,
+                new LocalLambdaConsumer.ChildDependency("fallback", "a", "b", "c", "d")
+        );
+
+        assertEquals("fk__operational.order_items__operational.products", dependency.fkName());
+        assertEquals("operational", dependency.childSchema());
+        assertEquals("order_items", dependency.childTable());
+        assertEquals("operational", dependency.parentSchema());
+        assertEquals("products", dependency.parentTable());
     }
 
     @Test

@@ -205,6 +205,33 @@ The split flow also carries Debezium transaction metadata:
 - `cdc.transaction_metadata` stores transaction `BEGIN` and `END` rows with `event_count`, `data_collections`, and `ts_ms` for consistency checks and orchestration.
 - `cdc.processed_events` stores the unique destination idempotency key for every accepted business event.
 
+The local databases also enforce core relational links with parseable FK names in the form `fk__child_schema.child_table__parent_schema.parent_table`:
+
+- Source `fk__inventory.accounts__inventory.customers`.
+- Source `fk__inventory.orders_flat__inventory.customers`.
+- Client destination `fk__client.addresses__client.customers`.
+- Operational destination `fk__operational.order_items__operational.orders`.
+- Operational destination `fk__operational.order_items__operational.products`.
+
+Because Kafka topics are consumed independently, destination child rows can arrive before their parent rows. The local Lambda replacement is dependency-aware:
+
+```text
+child arrives
+  -> FK parent is missing
+  -> rollback only the child write to a savepoint
+  -> write the event to cdc.postponed_fk_events
+  -> commit the rest of the pipeline work
+
+parent arrives
+  -> upsert parent
+  -> SELECT matching pending children FOR UPDATE
+  -> retry child upserts
+  -> mark successful pending rows APPLIED
+  -> keep still-blocked rows PENDING and update them to the current missing parent FK
+```
+
+This keeps FK violations from failing the whole pipeline while preserving real relational constraints in the destination databases.
+
 The local source-side Flink jobs use Kafka exactly-once sink settings for business topics:
 
 - Kafka consumers read with `properties.isolation.level = read_committed`.

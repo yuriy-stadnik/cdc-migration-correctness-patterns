@@ -14,7 +14,9 @@ import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Savepoint;
 import java.sql.Statement;
 import java.sql.Types;
 import java.util.Base64;
@@ -42,6 +44,19 @@ public class Handler implements RequestHandler<KafkaEvent, Map<String, Object>> 
     private final String operationalDbName = mustEnv("OPERATIONAL_DB_NAME");
     private final String operationalDbUser = mustEnv("OPERATIONAL_DB_USER");
     private final String operationalDbSecretArn = mustEnv("OPERATIONAL_DB_SECRET_ARN");
+
+    @FunctionalInterface
+    interface BusinessWrite {
+        void apply() throws Exception;
+    }
+
+    record ChildDependency(
+        String fkName,
+        String childSchema,
+        String childTable,
+        String parentSchema,
+        String parentTable
+    ) {}
 
     @Override
     public Map<String, Object> handleRequest(KafkaEvent event, Context context) {
@@ -79,10 +94,10 @@ public class Handler implements RequestHandler<KafkaEvent, Map<String, Object>> 
                         continue;
                     }
 
-                    Connection targetConn = topic.startsWith("client.") ? clientConn : operationalConn;
-                    if (upsertByTopic(targetConn, topic, payload)) {
+                    if (upsertByTopic(clientConn, operationalConn, topic, payload)) {
                         processed++;
                     } else {
+                        Connection targetConn = topic.startsWith("client.") ? clientConn : operationalConn;
                         insertRawEvent(targetConn, topic, rec, payload);
                         processed++;
                     }
@@ -96,30 +111,66 @@ public class Handler implements RequestHandler<KafkaEvent, Map<String, Object>> 
         }
     }
 
-    private boolean upsertByTopic(Connection conn, String topic, JsonNode payload) throws Exception {
+    private boolean upsertByTopic(Connection clientConn, Connection operationalConn, String topic, JsonNode payload) throws Exception {
         return switch (topic) {
             case "client.customers" -> {
-                upsertCustomer(conn, payload);
+                processBusinessEvent(
+                    clientConn, topic, String.valueOf(requiredLong(payload, "id")), payload,
+                    null,
+                    () -> upsertCustomer(clientConn, payload),
+                    () -> retryPendingChildren(clientConn, "client", "customers")
+                );
                 yield true;
             }
             case "client.addresses" -> {
-                upsertAddress(conn, payload);
+                processBusinessEvent(
+                    clientConn, topic,
+                    businessKey("customer_id", requiredLong(payload, "customer_id"), "address_type", requiredText(payload, "address_type")),
+                    payload,
+                    new ChildDependency("fk__client.addresses__client.customers", "client", "addresses", "client", "customers"),
+                    () -> upsertAddress(clientConn, payload),
+                    null
+                );
                 yield true;
             }
             case "operational.products" -> {
-                upsertProduct(conn, payload);
+                processBusinessEvent(
+                    operationalConn, topic, requiredText(payload, "name"), payload,
+                    null,
+                    () -> upsertProduct(operationalConn, payload),
+                    () -> retryPendingChildren(operationalConn, "operational", "products")
+                );
                 yield true;
             }
             case "operational.orders" -> {
-                upsertOrder(conn, payload);
+                processBusinessEvent(
+                    operationalConn, topic, String.valueOf(requiredLong(payload, "id")), payload,
+                    null,
+                    () -> upsertOrder(operationalConn, payload),
+                    () -> retryPendingChildren(operationalConn, "operational", "orders")
+                );
                 yield true;
             }
             case "operational.order_items" -> {
-                upsertOrderItem(conn, payload);
+                processBusinessEvent(
+                    operationalConn, topic,
+                    businessKey("order_id", requiredLong(payload, "order_id"), "product_name", requiredText(payload, "product_name")),
+                    payload,
+                    new ChildDependency("fk__operational.order_items__operational.orders", "operational", "order_items", "operational", "orders"),
+                    () -> upsertOrderItem(operationalConn, payload),
+                    null
+                );
                 yield true;
             }
             case "operational.contact_numbers" -> {
-                upsertContactNumber(conn, payload);
+                processBusinessEvent(
+                    operationalConn, topic,
+                    businessKey("customer_id", requiredLong(payload, "customer_id"), "phone_type", requiredText(payload, "phone_type")),
+                    payload,
+                    null,
+                    () -> upsertContactNumber(operationalConn, payload),
+                    null
+                );
                 yield true;
             }
             default -> false;
@@ -130,9 +181,10 @@ public class Handler implements RequestHandler<KafkaEvent, Map<String, Object>> 
         try (PreparedStatement ps = conn.prepareStatement("""
             INSERT INTO client.customers (
                 id, first_name, last_name, email, status, created_at, updated_at,
-                source_record_type, source_ts_ms, source_tx_id, source_tx_total_order, source_tx_data_collection_order
+                source_record_type, source_ts_ms, source_tx_id, source_tx_total_order,
+                source_tx_data_collection_order, idempotency_key
             )
-            VALUES (?, ?, ?, ?, ?, ?::timestamptz, ?::timestamptz, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?::timestamptz, ?::timestamptz, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (id) DO UPDATE
             SET first_name = EXCLUDED.first_name,
                 last_name = EXCLUDED.last_name,
@@ -144,7 +196,11 @@ public class Handler implements RequestHandler<KafkaEvent, Map<String, Object>> 
                 source_ts_ms = EXCLUDED.source_ts_ms,
                 source_tx_id = EXCLUDED.source_tx_id,
                 source_tx_total_order = EXCLUDED.source_tx_total_order,
-                source_tx_data_collection_order = EXCLUDED.source_tx_data_collection_order
+                source_tx_data_collection_order = EXCLUDED.source_tx_data_collection_order,
+                idempotency_key = EXCLUDED.idempotency_key
+            WHERE client.customers.source_tx_total_order IS NULL
+               OR EXCLUDED.source_tx_total_order IS NULL
+               OR EXCLUDED.source_tx_total_order >= client.customers.source_tx_total_order
         """)) {
             ps.setLong(1, requiredLong(payload, "id"));
             ps.setString(2, requiredText(payload, "first_name"));
@@ -162,9 +218,10 @@ public class Handler implements RequestHandler<KafkaEvent, Map<String, Object>> 
         try (PreparedStatement ps = conn.prepareStatement("""
             INSERT INTO client.addresses (
                 customer_id, address_type, street, city, state, zip_code,
-                source_record_type, source_ts_ms, source_tx_id, source_tx_total_order, source_tx_data_collection_order
+                source_record_type, source_ts_ms, source_tx_id, source_tx_total_order,
+                source_tx_data_collection_order, idempotency_key
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (customer_id, address_type) DO UPDATE
             SET street = EXCLUDED.street,
                 city = EXCLUDED.city,
@@ -174,7 +231,11 @@ public class Handler implements RequestHandler<KafkaEvent, Map<String, Object>> 
                 source_ts_ms = EXCLUDED.source_ts_ms,
                 source_tx_id = EXCLUDED.source_tx_id,
                 source_tx_total_order = EXCLUDED.source_tx_total_order,
-                source_tx_data_collection_order = EXCLUDED.source_tx_data_collection_order
+                source_tx_data_collection_order = EXCLUDED.source_tx_data_collection_order,
+                idempotency_key = EXCLUDED.idempotency_key
+            WHERE client.addresses.source_tx_total_order IS NULL
+               OR EXCLUDED.source_tx_total_order IS NULL
+               OR EXCLUDED.source_tx_total_order >= client.addresses.source_tx_total_order
         """)) {
             ps.setLong(1, requiredLong(payload, "customer_id"));
             ps.setString(2, requiredText(payload, "address_type"));
@@ -191,9 +252,10 @@ public class Handler implements RequestHandler<KafkaEvent, Map<String, Object>> 
         try (PreparedStatement ps = conn.prepareStatement("""
             INSERT INTO operational.products (
                 name, category, current_price,
-                source_record_type, source_ts_ms, source_tx_id, source_tx_total_order, source_tx_data_collection_order
+                source_record_type, source_ts_ms, source_tx_id, source_tx_total_order,
+                source_tx_data_collection_order, idempotency_key
             )
-            VALUES (?, ?, ?::numeric, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?::numeric, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (name) DO UPDATE
             SET category = EXCLUDED.category,
                 current_price = EXCLUDED.current_price,
@@ -201,7 +263,11 @@ public class Handler implements RequestHandler<KafkaEvent, Map<String, Object>> 
                 source_ts_ms = EXCLUDED.source_ts_ms,
                 source_tx_id = EXCLUDED.source_tx_id,
                 source_tx_total_order = EXCLUDED.source_tx_total_order,
-                source_tx_data_collection_order = EXCLUDED.source_tx_data_collection_order
+                source_tx_data_collection_order = EXCLUDED.source_tx_data_collection_order,
+                idempotency_key = EXCLUDED.idempotency_key
+            WHERE operational.products.source_tx_total_order IS NULL
+               OR EXCLUDED.source_tx_total_order IS NULL
+               OR EXCLUDED.source_tx_total_order >= operational.products.source_tx_total_order
         """)) {
             ps.setString(1, requiredText(payload, "name"));
             ps.setString(2, optionalText(payload, "category"));
@@ -215,9 +281,10 @@ public class Handler implements RequestHandler<KafkaEvent, Map<String, Object>> 
         try (PreparedStatement ps = conn.prepareStatement("""
             INSERT INTO operational.orders (
                 id, customer_id, order_date, status,
-                source_record_type, source_ts_ms, source_tx_id, source_tx_total_order, source_tx_data_collection_order
+                source_record_type, source_ts_ms, source_tx_id, source_tx_total_order,
+                source_tx_data_collection_order, idempotency_key
             )
-            VALUES (?, ?, ?::timestamptz, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?::timestamptz, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (id) DO UPDATE
             SET customer_id = EXCLUDED.customer_id,
                 order_date = EXCLUDED.order_date,
@@ -226,7 +293,11 @@ public class Handler implements RequestHandler<KafkaEvent, Map<String, Object>> 
                 source_ts_ms = EXCLUDED.source_ts_ms,
                 source_tx_id = EXCLUDED.source_tx_id,
                 source_tx_total_order = EXCLUDED.source_tx_total_order,
-                source_tx_data_collection_order = EXCLUDED.source_tx_data_collection_order
+                source_tx_data_collection_order = EXCLUDED.source_tx_data_collection_order,
+                idempotency_key = EXCLUDED.idempotency_key
+            WHERE operational.orders.source_tx_total_order IS NULL
+               OR EXCLUDED.source_tx_total_order IS NULL
+               OR EXCLUDED.source_tx_total_order >= operational.orders.source_tx_total_order
         """)) {
             ps.setLong(1, requiredLong(payload, "id"));
             ps.setLong(2, requiredLong(payload, "customer_id"));
@@ -241,9 +312,10 @@ public class Handler implements RequestHandler<KafkaEvent, Map<String, Object>> 
         try (PreparedStatement ps = conn.prepareStatement("""
             INSERT INTO operational.order_items (
                 order_id, product_name, quantity, price_at_purchase,
-                source_record_type, source_ts_ms, source_tx_id, source_tx_total_order, source_tx_data_collection_order
+                source_record_type, source_ts_ms, source_tx_id, source_tx_total_order,
+                source_tx_data_collection_order, idempotency_key
             )
-            VALUES (?, ?, ?, ?::numeric, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?::numeric, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (order_id, product_name) DO UPDATE
             SET quantity = EXCLUDED.quantity,
                 price_at_purchase = EXCLUDED.price_at_purchase,
@@ -251,7 +323,11 @@ public class Handler implements RequestHandler<KafkaEvent, Map<String, Object>> 
                 source_ts_ms = EXCLUDED.source_ts_ms,
                 source_tx_id = EXCLUDED.source_tx_id,
                 source_tx_total_order = EXCLUDED.source_tx_total_order,
-                source_tx_data_collection_order = EXCLUDED.source_tx_data_collection_order
+                source_tx_data_collection_order = EXCLUDED.source_tx_data_collection_order,
+                idempotency_key = EXCLUDED.idempotency_key
+            WHERE operational.order_items.source_tx_total_order IS NULL
+               OR EXCLUDED.source_tx_total_order IS NULL
+               OR EXCLUDED.source_tx_total_order >= operational.order_items.source_tx_total_order
         """)) {
             ps.setLong(1, requiredLong(payload, "order_id"));
             ps.setString(2, requiredText(payload, "product_name"));
@@ -266,16 +342,21 @@ public class Handler implements RequestHandler<KafkaEvent, Map<String, Object>> 
         try (PreparedStatement ps = conn.prepareStatement("""
             INSERT INTO operational.contact_numbers (
                 customer_id, phone_type, phone_number,
-                source_record_type, source_ts_ms, source_tx_id, source_tx_total_order, source_tx_data_collection_order
+                source_record_type, source_ts_ms, source_tx_id, source_tx_total_order,
+                source_tx_data_collection_order, idempotency_key
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (customer_id, phone_type) DO UPDATE
             SET phone_number = EXCLUDED.phone_number,
                 source_record_type = EXCLUDED.source_record_type,
                 source_ts_ms = EXCLUDED.source_ts_ms,
                 source_tx_id = EXCLUDED.source_tx_id,
                 source_tx_total_order = EXCLUDED.source_tx_total_order,
-                source_tx_data_collection_order = EXCLUDED.source_tx_data_collection_order
+                source_tx_data_collection_order = EXCLUDED.source_tx_data_collection_order,
+                idempotency_key = EXCLUDED.idempotency_key
+            WHERE operational.contact_numbers.source_tx_total_order IS NULL
+               OR EXCLUDED.source_tx_total_order IS NULL
+               OR EXCLUDED.source_tx_total_order >= operational.contact_numbers.source_tx_total_order
         """)) {
             ps.setLong(1, requiredLong(payload, "customer_id"));
             ps.setString(2, requiredText(payload, "phone_type"));
@@ -320,6 +401,188 @@ public class Handler implements RequestHandler<KafkaEvent, Map<String, Object>> 
         }
     }
 
+    private void processBusinessEvent(
+        Connection conn,
+        String topic,
+        String targetBusinessKey,
+        JsonNode payload,
+        ChildDependency dependency,
+        BusinessWrite write,
+        BusinessWrite afterWrite
+    ) throws Exception {
+        boolean originalAutoCommit = conn.getAutoCommit();
+        try {
+            conn.setAutoCommit(false);
+            if (insertProcessedEvent(conn, topic, targetBusinessKey, payload)) {
+                Savepoint businessSavepoint = conn.setSavepoint("business_write");
+                try {
+                    write.apply();
+                    conn.releaseSavepoint(businessSavepoint);
+                } catch (SQLException e) {
+                    if (!isForeignKeyViolation(e) || dependency == null) {
+                        throw e;
+                    }
+                    conn.rollback(businessSavepoint);
+                    postponeForeignKeyEvent(conn, topic, targetBusinessKey, payload, resolveDependency(topic, e, dependency), e);
+                }
+            }
+            if (afterWrite != null) {
+                afterWrite.apply();
+            }
+            conn.commit();
+        } catch (Exception e) {
+            conn.rollback();
+            throw e;
+        } finally {
+            conn.setAutoCommit(originalAutoCommit);
+        }
+    }
+
+    private boolean insertProcessedEvent(Connection conn, String topic, String targetBusinessKey, JsonNode payload) throws Exception {
+        try (PreparedStatement ps = conn.prepareStatement("""
+            INSERT INTO cdc.processed_events (
+                event_id, source_tx_id, source_tx_total_order, target_topic, target_business_key, payload
+            )
+            VALUES (?, ?, ?, ?, ?, ?::jsonb)
+            ON CONFLICT (event_id) DO NOTHING
+        """)) {
+            ps.setString(1, idempotencyKey(payload, topic, targetBusinessKey));
+            ps.setString(2, processedSourceTxId(payload));
+            setNullableLong(ps, 3, optionalLong(payload, "source_tx_total_order"));
+            ps.setString(4, topic);
+            ps.setString(5, targetBusinessKey);
+            ps.setString(6, payload.toString());
+            return ps.executeUpdate() == 1;
+        }
+    }
+
+    private void postponeForeignKeyEvent(
+        Connection conn,
+        String topic,
+        String targetBusinessKey,
+        JsonNode payload,
+        ChildDependency dependency,
+        SQLException error
+    ) throws Exception {
+        try (PreparedStatement ps = conn.prepareStatement("""
+            INSERT INTO cdc.postponed_fk_events (
+                event_id, fk_name, child_schema, child_table, parent_schema, parent_table,
+                target_topic, target_business_key, payload, error_message, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, NOW())
+            ON CONFLICT (event_id) DO UPDATE
+            SET fk_name = EXCLUDED.fk_name,
+                child_schema = EXCLUDED.child_schema,
+                child_table = EXCLUDED.child_table,
+                parent_schema = EXCLUDED.parent_schema,
+                parent_table = EXCLUDED.parent_table,
+                target_topic = EXCLUDED.target_topic,
+                target_business_key = EXCLUDED.target_business_key,
+                payload = EXCLUDED.payload,
+                error_message = EXCLUDED.error_message,
+                status = 'PENDING',
+                updated_at = NOW()
+        """)) {
+            ps.setString(1, idempotencyKey(payload, topic, targetBusinessKey));
+            ps.setString(2, dependency.fkName());
+            ps.setString(3, dependency.childSchema());
+            ps.setString(4, dependency.childTable());
+            ps.setString(5, dependency.parentSchema());
+            ps.setString(6, dependency.parentTable());
+            ps.setString(7, topic);
+            ps.setString(8, targetBusinessKey);
+            ps.setString(9, payload.toString());
+            ps.setString(10, error.getMessage());
+            ps.executeUpdate();
+        }
+    }
+
+    private void retryPendingChildren(Connection conn, String parentSchema, String parentTable) throws Exception {
+        try (PreparedStatement ps = conn.prepareStatement("""
+            SELECT event_id, target_topic, payload::text
+            FROM cdc.postponed_fk_events
+            WHERE status = 'PENDING'
+              AND parent_schema = ?
+              AND parent_table = ?
+            ORDER BY created_at
+            FOR UPDATE
+        """)) {
+            ps.setString(1, parentSchema);
+            ps.setString(2, parentTable);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    retryPendingChild(
+                        conn,
+                        rs.getString("event_id"),
+                        rs.getString("target_topic"),
+                        MAPPER.readTree(rs.getString("payload"))
+                    );
+                }
+            }
+        }
+    }
+
+    private void retryPendingChild(Connection conn, String eventId, String topic, JsonNode payload) throws Exception {
+        Savepoint retrySavepoint = conn.setSavepoint("retry_pending_child");
+        try {
+            upsertPendingChild(topic, conn, payload);
+            markPendingChildApplied(conn, eventId);
+            conn.releaseSavepoint(retrySavepoint);
+        } catch (SQLException e) {
+            if (!isForeignKeyViolation(e)) {
+                throw e;
+            }
+            conn.rollback(retrySavepoint);
+            markPendingChildRetry(conn, eventId, resolveDependency(topic, e, fallbackDependency(topic)), e);
+        }
+    }
+
+    private void upsertPendingChild(String topic, Connection conn, JsonNode payload) throws Exception {
+        switch (topic) {
+            case "client.addresses" -> upsertAddress(conn, payload);
+            case "operational.order_items" -> upsertOrderItem(conn, payload);
+            default -> throw new IllegalArgumentException("Unsupported postponed FK topic: " + topic);
+        }
+    }
+
+    private void markPendingChildApplied(Connection conn, String eventId) throws Exception {
+        try (PreparedStatement ps = conn.prepareStatement("""
+            UPDATE cdc.postponed_fk_events
+            SET status = 'APPLIED',
+                updated_at = NOW(),
+                last_retry_at = NOW()
+            WHERE event_id = ?
+        """)) {
+            ps.setString(1, eventId);
+            ps.executeUpdate();
+        }
+    }
+
+    private void markPendingChildRetry(Connection conn, String eventId, ChildDependency dependency, SQLException error) throws Exception {
+        try (PreparedStatement ps = conn.prepareStatement("""
+            UPDATE cdc.postponed_fk_events
+            SET retry_count = retry_count + 1,
+                fk_name = ?,
+                child_schema = ?,
+                child_table = ?,
+                parent_schema = ?,
+                parent_table = ?,
+                error_message = ?,
+                updated_at = NOW(),
+                last_retry_at = NOW()
+            WHERE event_id = ?
+        """)) {
+            ps.setString(1, dependency.fkName());
+            ps.setString(2, dependency.childSchema());
+            ps.setString(3, dependency.childTable());
+            ps.setString(4, dependency.parentSchema());
+            ps.setString(5, dependency.parentTable());
+            ps.setString(6, error.getMessage());
+            ps.setString(7, eventId);
+            ps.executeUpdate();
+        }
+    }
+
     private void ensureClientSchema(Connection conn) throws Exception {
         if (!CLIENT_DDL_ENSURED.compareAndSet(false, true)) {
             return;
@@ -340,6 +603,7 @@ public class Handler implements RequestHandler<KafkaEvent, Map<String, Object>> 
                   source_record_type TEXT,
                   source_ts_ms BIGINT,
                   source_tx_id TEXT,
+                  idempotency_key VARCHAR(255),
                   source_tx_total_order BIGINT,
                   source_tx_data_collection_order BIGINT
                 );
@@ -354,9 +618,12 @@ public class Handler implements RequestHandler<KafkaEvent, Map<String, Object>> 
                   source_record_type TEXT,
                   source_ts_ms BIGINT,
                   source_tx_id TEXT,
+                  idempotency_key VARCHAR(255),
                   source_tx_total_order BIGINT,
                   source_tx_data_collection_order BIGINT,
-                  PRIMARY KEY (customer_id, address_type)
+                  PRIMARY KEY (customer_id, address_type),
+                  CONSTRAINT "fk__client.addresses__client.customers"
+                    FOREIGN KEY (customer_id) REFERENCES client.customers(id)
                 );
 
                 CREATE TABLE IF NOT EXISTS client.events (
@@ -369,6 +636,34 @@ public class Handler implements RequestHandler<KafkaEvent, Map<String, Object>> 
                   UNIQUE(topic, kafka_partition, kafka_offset)
                 );
 
+                CREATE TABLE IF NOT EXISTS cdc.processed_events (
+                  event_id TEXT PRIMARY KEY,
+                  source_tx_id TEXT NOT NULL,
+                  source_tx_total_order BIGINT,
+                  target_topic TEXT NOT NULL,
+                  target_business_key TEXT NOT NULL,
+                  processed_at TIMESTAMPTZ DEFAULT NOW(),
+                  payload JSONB NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS cdc.postponed_fk_events (
+                  event_id TEXT PRIMARY KEY,
+                  fk_name TEXT NOT NULL,
+                  child_schema TEXT NOT NULL,
+                  child_table TEXT NOT NULL,
+                  parent_schema TEXT NOT NULL,
+                  parent_table TEXT NOT NULL,
+                  target_topic TEXT NOT NULL,
+                  target_business_key TEXT NOT NULL,
+                  payload JSONB NOT NULL,
+                  error_message TEXT,
+                  retry_count INTEGER NOT NULL DEFAULT 0,
+                  status TEXT NOT NULL DEFAULT 'PENDING',
+                  created_at TIMESTAMPTZ DEFAULT NOW(),
+                  updated_at TIMESTAMPTZ DEFAULT NOW(),
+                  last_retry_at TIMESTAMPTZ
+                );
+
                 CREATE TABLE IF NOT EXISTS cdc.transaction_metadata (
                   tx_id TEXT NOT NULL,
                   status TEXT NOT NULL,
@@ -378,6 +673,22 @@ public class Handler implements RequestHandler<KafkaEvent, Map<String, Object>> 
                   updated_at TIMESTAMPTZ DEFAULT NOW(),
                   PRIMARY KEY (tx_id, status)
                 );
+
+                ALTER TABLE client.customers
+                  ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(255);
+                ALTER TABLE client.addresses
+                  ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(255);
+
+                DO $$
+                BEGIN
+                  IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint WHERE conname = 'fk__client.addresses__client.customers'
+                  ) THEN
+                    ALTER TABLE client.addresses
+                      ADD CONSTRAINT "fk__client.addresses__client.customers"
+                      FOREIGN KEY (customer_id) REFERENCES client.customers(id) NOT VALID;
+                  END IF;
+                END $$;
             """);
         }
     }
@@ -398,6 +709,7 @@ public class Handler implements RequestHandler<KafkaEvent, Map<String, Object>> 
                   source_record_type TEXT,
                   source_ts_ms BIGINT,
                   source_tx_id TEXT,
+                  idempotency_key VARCHAR(255),
                   source_tx_total_order BIGINT,
                   source_tx_data_collection_order BIGINT
                 );
@@ -410,6 +722,7 @@ public class Handler implements RequestHandler<KafkaEvent, Map<String, Object>> 
                   source_record_type TEXT,
                   source_ts_ms BIGINT,
                   source_tx_id TEXT,
+                  idempotency_key VARCHAR(255),
                   source_tx_total_order BIGINT,
                   source_tx_data_collection_order BIGINT
                 );
@@ -422,9 +735,14 @@ public class Handler implements RequestHandler<KafkaEvent, Map<String, Object>> 
                   source_record_type TEXT,
                   source_ts_ms BIGINT,
                   source_tx_id TEXT,
+                  idempotency_key VARCHAR(255),
                   source_tx_total_order BIGINT,
                   source_tx_data_collection_order BIGINT,
-                  PRIMARY KEY (order_id, product_name)
+                  PRIMARY KEY (order_id, product_name),
+                  CONSTRAINT "fk__operational.order_items__operational.orders"
+                    FOREIGN KEY (order_id) REFERENCES operational.orders(id),
+                  CONSTRAINT "fk__operational.order_items__operational.products"
+                    FOREIGN KEY (product_name) REFERENCES operational.products(name)
                 );
 
                 CREATE TABLE IF NOT EXISTS operational.contact_numbers (
@@ -434,6 +752,7 @@ public class Handler implements RequestHandler<KafkaEvent, Map<String, Object>> 
                   source_record_type TEXT,
                   source_ts_ms BIGINT,
                   source_tx_id TEXT,
+                  idempotency_key VARCHAR(255),
                   source_tx_total_order BIGINT,
                   source_tx_data_collection_order BIGINT,
                   PRIMARY KEY (customer_id, phone_type)
@@ -449,6 +768,34 @@ public class Handler implements RequestHandler<KafkaEvent, Map<String, Object>> 
                   UNIQUE(topic, kafka_partition, kafka_offset)
                 );
 
+                CREATE TABLE IF NOT EXISTS cdc.processed_events (
+                  event_id TEXT PRIMARY KEY,
+                  source_tx_id TEXT NOT NULL,
+                  source_tx_total_order BIGINT,
+                  target_topic TEXT NOT NULL,
+                  target_business_key TEXT NOT NULL,
+                  processed_at TIMESTAMPTZ DEFAULT NOW(),
+                  payload JSONB NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS cdc.postponed_fk_events (
+                  event_id TEXT PRIMARY KEY,
+                  fk_name TEXT NOT NULL,
+                  child_schema TEXT NOT NULL,
+                  child_table TEXT NOT NULL,
+                  parent_schema TEXT NOT NULL,
+                  parent_table TEXT NOT NULL,
+                  target_topic TEXT NOT NULL,
+                  target_business_key TEXT NOT NULL,
+                  payload JSONB NOT NULL,
+                  error_message TEXT,
+                  retry_count INTEGER NOT NULL DEFAULT 0,
+                  status TEXT NOT NULL DEFAULT 'PENDING',
+                  created_at TIMESTAMPTZ DEFAULT NOW(),
+                  updated_at TIMESTAMPTZ DEFAULT NOW(),
+                  last_retry_at TIMESTAMPTZ
+                );
+
                 CREATE TABLE IF NOT EXISTS cdc.transaction_metadata (
                   tx_id TEXT NOT NULL,
                   status TEXT NOT NULL,
@@ -458,6 +805,33 @@ public class Handler implements RequestHandler<KafkaEvent, Map<String, Object>> 
                   updated_at TIMESTAMPTZ DEFAULT NOW(),
                   PRIMARY KEY (tx_id, status)
                 );
+
+                ALTER TABLE operational.products
+                  ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(255);
+                ALTER TABLE operational.orders
+                  ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(255);
+                ALTER TABLE operational.order_items
+                  ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(255);
+                ALTER TABLE operational.contact_numbers
+                  ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(255);
+
+                DO $$
+                BEGIN
+                  IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint WHERE conname = 'fk__operational.order_items__operational.orders'
+                  ) THEN
+                    ALTER TABLE operational.order_items
+                      ADD CONSTRAINT "fk__operational.order_items__operational.orders"
+                      FOREIGN KEY (order_id) REFERENCES operational.orders(id) NOT VALID;
+                  END IF;
+                  IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint WHERE conname = 'fk__operational.order_items__operational.products'
+                  ) THEN
+                    ALTER TABLE operational.order_items
+                      ADD CONSTRAINT "fk__operational.order_items__operational.products"
+                      FOREIGN KEY (product_name) REFERENCES operational.products(name) NOT VALID;
+                  END IF;
+                END $$;
             """);
         }
     }
@@ -515,7 +889,7 @@ public class Handler implements RequestHandler<KafkaEvent, Map<String, Object>> 
         return dash > 0 ? recordKey.substring(0, dash) : recordKey;
     }
 
-    private static String requiredText(JsonNode node, String field) {
+    static String requiredText(JsonNode node, String field) {
         JsonNode value = node.get(field);
         if (value == null || value.isNull() || value.asText().isBlank()) {
             throw new IllegalArgumentException("Missing required field: " + field);
@@ -556,12 +930,110 @@ public class Handler implements RequestHandler<KafkaEvent, Map<String, Object>> 
         return value.asInt();
     }
 
+    private static boolean isForeignKeyViolation(SQLException error) {
+        SQLException current = error;
+        while (current != null) {
+            if ("23503".equals(current.getSQLState())) {
+                return true;
+            }
+            current = current.getNextException();
+        }
+        return false;
+    }
+
+    static ChildDependency resolveDependency(String topic, SQLException error, ChildDependency fallback) {
+        String fkName = foreignKeyName(error);
+        if (fkName == null || !fkName.startsWith("fk__")) {
+            return fallback;
+        }
+        String[] sides = fkName.substring(4).split("__", 2);
+        if (sides.length != 2) {
+            return fallback;
+        }
+        String[] child = sides[0].split("[.]", 2);
+        String[] parent = sides[1].split("[.]", 2);
+        if (child.length != 2 || parent.length != 2) {
+            return fallback;
+        }
+        return new ChildDependency(fkName, child[0], child[1], parent[0], parent[1]);
+    }
+
+    private static ChildDependency fallbackDependency(String topic) {
+        return switch (topic) {
+            case "client.addresses" -> new ChildDependency(
+                "fk__client.addresses__client.customers",
+                "client",
+                "addresses",
+                "client",
+                "customers"
+            );
+            case "operational.order_items" -> new ChildDependency(
+                "fk__operational.order_items__operational.orders",
+                "operational",
+                "order_items",
+                "operational",
+                "orders"
+            );
+            default -> new ChildDependency("unknown", "unknown", "unknown", "unknown", "unknown");
+        };
+    }
+
+    private static String foreignKeyName(SQLException error) {
+        SQLException current = error;
+        while (current != null) {
+            String fkName = foreignKeyName(current.getMessage());
+            if (fkName != null) {
+                return fkName;
+            }
+            current = current.getNextException();
+        }
+        return null;
+    }
+
+    private static String foreignKeyName(String message) {
+        if (message == null) {
+            return null;
+        }
+        String marker = "foreign key constraint \"";
+        int start = message.indexOf(marker);
+        if (start < 0) {
+            return null;
+        }
+        int nameStart = start + marker.length();
+        int nameEnd = message.indexOf('"', nameStart);
+        return nameEnd < 0 ? null : message.substring(nameStart, nameEnd);
+    }
+
+    static String idempotencyKey(JsonNode payload, String targetTopic, String targetBusinessKey) {
+        String upstreamKey = optionalText(payload, "idempotency_key");
+        if (upstreamKey != null && !upstreamKey.isBlank()) {
+            return upstreamKey;
+        }
+        Long sourceTxTotalOrder = optionalLong(payload, "source_tx_total_order");
+        return "%s|%s|%s|%s".formatted(
+            processedSourceTxId(payload),
+            sourceTxTotalOrder == null ? -1L : sourceTxTotalOrder,
+            targetTopic,
+            targetBusinessKey
+        );
+    }
+
+    static String processedSourceTxId(JsonNode payload) {
+        String sourceTxId = optionalText(payload, "source_tx_id");
+        return sourceTxId == null || sourceTxId.isBlank() ? "no-tx" : sourceTxId;
+    }
+
+    static String businessKey(String firstName, Object firstValue, String secondName, Object secondValue) {
+        return "%s=%s|%s=%s".formatted(firstName, firstValue, secondName, secondValue);
+    }
+
     private static void setSourceMetadata(PreparedStatement ps, int startIndex, JsonNode payload) throws SQLException {
         ps.setString(startIndex, optionalText(payload, "source_record_type"));
         setNullableLong(ps, startIndex + 1, optionalLong(payload, "source_ts_ms"));
         ps.setString(startIndex + 2, optionalText(payload, "source_tx_id"));
         setNullableLong(ps, startIndex + 3, optionalLong(payload, "source_tx_total_order"));
         setNullableLong(ps, startIndex + 4, optionalLong(payload, "source_tx_data_collection_order"));
+        ps.setString(startIndex + 5, optionalText(payload, "idempotency_key"));
     }
 
     private static void setNullableLong(PreparedStatement ps, int idx, Long value) throws SQLException {
