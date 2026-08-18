@@ -371,6 +371,7 @@ CREATE TABLE customers_cdc (
   'connector' = 'kafka',
   'topic' = 'pg1.inventory.customers',
   'properties.bootstrap.servers' = 'kafka:29092',
+  'properties.isolation.level' = 'read_committed',
   'scan.startup.mode' = 'earliest-offset',
   'format' = 'json',
   'json.ignore-parse-errors' = 'true'
@@ -412,6 +413,7 @@ CREATE TABLE accounts_cdc (
   'connector' = 'kafka',
   'topic' = 'pg1.inventory.accounts',
   'properties.bootstrap.servers' = 'kafka:29092',
+  'properties.isolation.level' = 'read_committed',
   'scan.startup.mode' = 'earliest-offset',
   'format' = 'json',
   'json.ignore-parse-errors' = 'true'
@@ -445,6 +447,7 @@ CREATE TABLE orders_flat_cdc (
   'connector' = 'kafka',
   'topic' = 'pg1.inventory.orders_flat',
   'properties.bootstrap.servers' = 'kafka:29092',
+  'properties.isolation.level' = 'read_committed',
   'scan.startup.mode' = 'earliest-offset',
   'format' = 'json',
   'json.ignore-parse-errors' = 'true'
@@ -461,6 +464,7 @@ CREATE TABLE client_customers_topic (
   source_record_type STRING,
   source_ts_ms BIGINT,
   source_tx_id STRING,
+  idempotency_key STRING,
   source_tx_total_order BIGINT,
   source_tx_data_collection_order BIGINT,
   PRIMARY KEY (id) NOT ENFORCED
@@ -468,6 +472,12 @@ CREATE TABLE client_customers_topic (
   'connector' = 'upsert-kafka',
   'topic' = 'client.customers',
   'properties.bootstrap.servers' = 'kafka:29092',
+  'properties.enable.idempotence' = 'true',
+  'properties.acks' = 'all',
+  'properties.retries' = '2147483647',
+  'properties.max.in.flight.requests.per.connection' = '5',
+  'sink.delivery-guarantee' = 'exactly-once',
+  'sink.transactional-id-prefix' = 'cloud-client-customers',
   'key.format' = 'json',
   'value.format' = 'json'
 );
@@ -482,6 +492,7 @@ CREATE TABLE client_addresses_topic (
   source_record_type STRING,
   source_ts_ms BIGINT,
   source_tx_id STRING,
+  idempotency_key STRING,
   source_tx_total_order BIGINT,
   source_tx_data_collection_order BIGINT,
   PRIMARY KEY (customer_id, address_type) NOT ENFORCED
@@ -489,6 +500,12 @@ CREATE TABLE client_addresses_topic (
   'connector' = 'upsert-kafka',
   'topic' = 'client.addresses',
   'properties.bootstrap.servers' = 'kafka:29092',
+  'properties.enable.idempotence' = 'true',
+  'properties.acks' = 'all',
+  'properties.retries' = '2147483647',
+  'properties.max.in.flight.requests.per.connection' = '5',
+  'sink.delivery-guarantee' = 'exactly-once',
+  'sink.transactional-id-prefix' = 'cloud-client-addresses',
   'key.format' = 'json',
   'value.format' = 'json'
 );
@@ -500,6 +517,7 @@ CREATE TABLE operational_products_topic (
   source_record_type STRING,
   source_ts_ms BIGINT,
   source_tx_id STRING,
+  idempotency_key STRING,
   source_tx_total_order BIGINT,
   source_tx_data_collection_order BIGINT,
   PRIMARY KEY (name) NOT ENFORCED
@@ -507,6 +525,12 @@ CREATE TABLE operational_products_topic (
   'connector' = 'upsert-kafka',
   'topic' = 'operational.products',
   'properties.bootstrap.servers' = 'kafka:29092',
+  'properties.enable.idempotence' = 'true',
+  'properties.acks' = 'all',
+  'properties.retries' = '2147483647',
+  'properties.max.in.flight.requests.per.connection' = '5',
+  'sink.delivery-guarantee' = 'exactly-once',
+  'sink.transactional-id-prefix' = 'cloud-operational-products',
   'key.format' = 'json',
   'value.format' = 'json'
 );
@@ -519,6 +543,7 @@ CREATE TABLE operational_orders_topic (
   source_record_type STRING,
   source_ts_ms BIGINT,
   source_tx_id STRING,
+  idempotency_key STRING,
   source_tx_total_order BIGINT,
   source_tx_data_collection_order BIGINT,
   PRIMARY KEY (id) NOT ENFORCED
@@ -526,6 +551,12 @@ CREATE TABLE operational_orders_topic (
   'connector' = 'upsert-kafka',
   'topic' = 'operational.orders',
   'properties.bootstrap.servers' = 'kafka:29092',
+  'properties.enable.idempotence' = 'true',
+  'properties.acks' = 'all',
+  'properties.retries' = '2147483647',
+  'properties.max.in.flight.requests.per.connection' = '5',
+  'sink.delivery-guarantee' = 'exactly-once',
+  'sink.transactional-id-prefix' = 'cloud-operational-orders',
   'key.format' = 'json',
   'value.format' = 'json'
 );
@@ -538,6 +569,7 @@ CREATE TABLE operational_order_items_topic (
   source_record_type STRING,
   source_ts_ms BIGINT,
   source_tx_id STRING,
+  idempotency_key STRING,
   source_tx_total_order BIGINT,
   source_tx_data_collection_order BIGINT,
   PRIMARY KEY (order_id, product_name) NOT ENFORCED
@@ -545,6 +577,12 @@ CREATE TABLE operational_order_items_topic (
   'connector' = 'upsert-kafka',
   'topic' = 'operational.order_items',
   'properties.bootstrap.servers' = 'kafka:29092',
+  'properties.enable.idempotence' = 'true',
+  'properties.acks' = 'all',
+  'properties.retries' = '2147483647',
+  'properties.max.in.flight.requests.per.connection' = '5',
+  'sink.delivery-guarantee' = 'exactly-once',
+  'sink.transactional-id-prefix' = 'cloud-operational-order-items',
   'key.format' = 'json',
   'value.format' = 'json'
 );
@@ -556,6 +594,7 @@ CREATE TABLE operational_contact_numbers_topic (
   source_record_type STRING,
   source_ts_ms BIGINT,
   source_tx_id STRING,
+  idempotency_key STRING,
   source_tx_total_order BIGINT,
   source_tx_data_collection_order BIGINT,
   PRIMARY KEY (customer_id, phone_type) NOT ENFORCED
@@ -563,6 +602,12 @@ CREATE TABLE operational_contact_numbers_topic (
   'connector' = 'upsert-kafka',
   'topic' = 'operational.contact_numbers',
   'properties.bootstrap.servers' = 'kafka:29092',
+  'properties.enable.idempotence' = 'true',
+  'properties.acks' = 'all',
+  'properties.retries' = '2147483647',
+  'properties.max.in.flight.requests.per.connection' = '5',
+  'sink.delivery-guarantee' = 'exactly-once',
+  'sink.transactional-id-prefix' = 'cloud-operational-contact-numbers',
   'key.format' = 'json',
   'value.format' = 'json'
 );
@@ -579,9 +624,11 @@ SELECT
   CASE op WHEN 'c' THEN 'I' WHEN 'r' THEN 'I' WHEN 'u' THEN 'U' WHEN 'd' THEN 'D' ELSE op END AS source_record_type,
   ts_ms AS source_ts_ms,
   `transaction`.id AS source_tx_id,
+  CONCAT(COALESCE(`transaction`.id, 'no-tx'), '|', CAST(COALESCE(`transaction`.total_order, CAST(-1 AS BIGINT)) AS STRING), '|client.customers|', CAST(COALESCE(`after`.id, `before`.id) AS STRING)) AS idempotency_key,
   `transaction`.total_order AS source_tx_total_order,
   `transaction`.data_collection_order AS source_tx_data_collection_order
-FROM customers_cdc;
+FROM customers_cdc
+WHERE COALESCE(`after`.id, `before`.id) IS NOT NULL;
 
 INSERT INTO client_addresses_topic
 SELECT
@@ -594,6 +641,7 @@ SELECT
   CASE op WHEN 'c' THEN 'I' WHEN 'r' THEN 'I' WHEN 'u' THEN 'U' WHEN 'd' THEN 'D' ELSE op END AS source_record_type,
   ts_ms AS source_ts_ms,
   `transaction`.id AS source_tx_id,
+  CONCAT(COALESCE(`transaction`.id, 'no-tx'), '|', CAST(COALESCE(`transaction`.total_order, CAST(-1 AS BIGINT)) AS STRING), '|client.addresses|customer_id=', CAST(COALESCE(`after`.customer_id, `before`.customer_id) AS STRING), '|address_type=HOME') AS idempotency_key,
   `transaction`.total_order AS source_tx_total_order,
   `transaction`.data_collection_order AS source_tx_data_collection_order
 FROM accounts_cdc
@@ -607,12 +655,12 @@ SELECT
   CASE op WHEN 'c' THEN 'I' WHEN 'r' THEN 'I' WHEN 'u' THEN 'U' WHEN 'd' THEN 'D' ELSE op END AS source_record_type,
   ts_ms AS source_ts_ms,
   `transaction`.id AS source_tx_id,
+  CONCAT(COALESCE(`transaction`.id, 'no-tx'), '|', CAST(COALESCE(`transaction`.total_order, CAST(-1 AS BIGINT)) AS STRING), '|operational.contact_numbers|customer_id=', CAST(COALESCE(`after`.customer_id, `before`.customer_id) AS STRING), '|phone_type=HOME') AS idempotency_key,
   `transaction`.total_order AS source_tx_total_order,
   `transaction`.data_collection_order AS source_tx_data_collection_order
 FROM accounts_cdc
-WHERE COALESCE(`after`.home_phone, `before`.home_phone) IS NOT NULL;
-
-INSERT INTO operational_contact_numbers_topic
+WHERE COALESCE(`after`.home_phone, `before`.home_phone) IS NOT NULL
+UNION ALL
 SELECT
   COALESCE(`after`.customer_id, `before`.customer_id) AS customer_id,
   'WORK' AS phone_type,
@@ -620,12 +668,12 @@ SELECT
   CASE op WHEN 'c' THEN 'I' WHEN 'r' THEN 'I' WHEN 'u' THEN 'U' WHEN 'd' THEN 'D' ELSE op END AS source_record_type,
   ts_ms AS source_ts_ms,
   `transaction`.id AS source_tx_id,
+  CONCAT(COALESCE(`transaction`.id, 'no-tx'), '|', CAST(COALESCE(`transaction`.total_order, CAST(-1 AS BIGINT)) AS STRING), '|operational.contact_numbers|customer_id=', CAST(COALESCE(`after`.customer_id, `before`.customer_id) AS STRING), '|phone_type=WORK') AS idempotency_key,
   `transaction`.total_order AS source_tx_total_order,
   `transaction`.data_collection_order AS source_tx_data_collection_order
 FROM accounts_cdc
-WHERE COALESCE(`after`.work_phone, `before`.work_phone) IS NOT NULL;
-
-INSERT INTO operational_contact_numbers_topic
+WHERE COALESCE(`after`.work_phone, `before`.work_phone) IS NOT NULL
+UNION ALL
 SELECT
   COALESCE(`after`.customer_id, `before`.customer_id) AS customer_id,
   'MOBILE' AS phone_type,
@@ -633,6 +681,7 @@ SELECT
   CASE op WHEN 'c' THEN 'I' WHEN 'r' THEN 'I' WHEN 'u' THEN 'U' WHEN 'd' THEN 'D' ELSE op END AS source_record_type,
   ts_ms AS source_ts_ms,
   `transaction`.id AS source_tx_id,
+  CONCAT(COALESCE(`transaction`.id, 'no-tx'), '|', CAST(COALESCE(`transaction`.total_order, CAST(-1 AS BIGINT)) AS STRING), '|operational.contact_numbers|customer_id=', CAST(COALESCE(`after`.customer_id, `before`.customer_id) AS STRING), '|phone_type=MOBILE') AS idempotency_key,
   `transaction`.total_order AS source_tx_total_order,
   `transaction`.data_collection_order AS source_tx_data_collection_order
 FROM accounts_cdc
@@ -646,6 +695,7 @@ SELECT
   CASE op WHEN 'c' THEN 'I' WHEN 'r' THEN 'I' WHEN 'u' THEN 'U' WHEN 'd' THEN 'D' ELSE op END AS source_record_type,
   ts_ms AS source_ts_ms,
   `transaction`.id AS source_tx_id,
+  CONCAT(COALESCE(`transaction`.id, 'no-tx'), '|', CAST(COALESCE(`transaction`.total_order, CAST(-1 AS BIGINT)) AS STRING), '|operational.products|', COALESCE(`after`.product_name, `before`.product_name)) AS idempotency_key,
   `transaction`.total_order AS source_tx_total_order,
   `transaction`.data_collection_order AS source_tx_data_collection_order
 FROM orders_flat_cdc
@@ -660,6 +710,7 @@ SELECT
   CASE op WHEN 'c' THEN 'I' WHEN 'r' THEN 'I' WHEN 'u' THEN 'U' WHEN 'd' THEN 'D' ELSE op END AS source_record_type,
   ts_ms AS source_ts_ms,
   `transaction`.id AS source_tx_id,
+  CONCAT(COALESCE(`transaction`.id, 'no-tx'), '|', CAST(COALESCE(`transaction`.total_order, CAST(-1 AS BIGINT)) AS STRING), '|operational.orders|', CAST(COALESCE(`after`.order_id, `before`.order_id) AS STRING)) AS idempotency_key,
   `transaction`.total_order AS source_tx_total_order,
   `transaction`.data_collection_order AS source_tx_data_collection_order
 FROM orders_flat_cdc
@@ -674,6 +725,7 @@ SELECT
   CASE op WHEN 'c' THEN 'I' WHEN 'r' THEN 'I' WHEN 'u' THEN 'U' WHEN 'd' THEN 'D' ELSE op END AS source_record_type,
   ts_ms AS source_ts_ms,
   `transaction`.id AS source_tx_id,
+  CONCAT(COALESCE(`transaction`.id, 'no-tx'), '|', CAST(COALESCE(`transaction`.total_order, CAST(-1 AS BIGINT)) AS STRING), '|operational.order_items|order_id=', CAST(COALESCE(`after`.order_id, `before`.order_id) AS STRING), '|product_name=', COALESCE(`after`.product_name, `before`.product_name)) AS idempotency_key,
   `transaction`.total_order AS source_tx_total_order,
   `transaction`.data_collection_order AS source_tx_data_collection_order
 FROM orders_flat_cdc
@@ -700,6 +752,12 @@ target->source.enabled = false
 # Mirror only required business topics and selected groups
 source->target.topics = ${mm2_topic_allowlist}
 source->target.groups = ${mm2_group_allowlist}
+
+target.exactly.once.source.support = enabled
+dedicated.mode.enable.internal.rest = true
+source.consumer.isolation.level = read_committed
+source->target.sync.topic.configs.enabled = false
+source->target.sync.topic.acls.enabled = false
 
 # Serverless-safe replication defaults
 replication.factor = 1
@@ -786,6 +844,7 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_TRANSACTION_MAX_TIMEOUT_MS: "7200000"
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
     volumes:

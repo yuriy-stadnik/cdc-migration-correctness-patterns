@@ -30,6 +30,10 @@ dependencies {
     implementation "org.postgresql:postgresql:42.7.4"
     implementation platform("software.amazon.awssdk:bom:2.25.50")
     implementation "software.amazon.awssdk:secretsmanager"
+
+    testImplementation platform('org.junit:junit-bom:5.10.3')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
 tasks.withType(JavaCompile).configureEach {
@@ -43,4 +47,8 @@ shadowJar {
 
 tasks.build {
     dependsOn tasks.shadowJar
+}
+
+tasks.test {
+    useJUnitPlatform()
 }
