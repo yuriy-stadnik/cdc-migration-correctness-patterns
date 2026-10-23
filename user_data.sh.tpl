@@ -98,7 +98,7 @@ cat > /opt/lab/integration-test-cdc-to-kafka.sh <<'EOF'
 set -euo pipefail
 
 LAB_DIR="$${LAB_DIR:-/opt/lab}"
-TOPIC="$${TOPIC:-pg1.inventory.customers}"
+TOPIC="$${TOPIC:-cdc.source.capture.v2}"
 BOOTSTRAP_SERVER="$${BOOTSTRAP_SERVER:-kafka:29092}"
 TIMEOUT_SECONDS="$${TIMEOUT_SECONDS:-120}"
 CUSTOMER_ID="$${CUSTOMER_ID:-$(( $(date +%s) % 1000000000 ))}"
@@ -151,7 +151,7 @@ wait_for_command "Kafka Connect REST API" "$TIMEOUT_SECONDS" \
   curl -fsS http://localhost:8083/connectors
 
 echo "Checking Debezium connector status..."
-CONNECTOR_STATUS="$(curl -fsS http://localhost:8083/connectors/legacy-postgres-source/status)"
+CONNECTOR_STATUS="$(curl -fsS http://localhost:8083/connectors/source-version-v2/status)"
 echo "$CONNECTOR_STATUS"
 if ! printf '%s' "$CONNECTOR_STATUS" | grep -q '"state":"RUNNING"'; then
   echo "Debezium connector is not RUNNING." >&2
@@ -163,15 +163,19 @@ wait_for_command "Kafka topic $TOPIC" "$TIMEOUT_SECONDS" \
   docker compose exec -T kafka kafka-topics --bootstrap-server "$BOOTSTRAP_SERVER" --describe --topic "$TOPIC"
 
 echo "Inserting customer id=$CUSTOMER_ID email=$EMAIL into inventory.customers..."
-docker compose exec -T legacy-postgres psql -v ON_ERROR_STOP=1 -U postgres -d appdb \
-  -c "INSERT INTO inventory.customers (id, first_name, last_name, email, status, updated_at)
+docker compose exec -T -e PGPASSWORD=source_app legacy-postgres psql -v ON_ERROR_STOP=1 -U source_app -d appdb <<SQL
+BEGIN;
+SELECT source_cdc.begin_write();
+INSERT INTO inventory.customers (id, first_name, last_name, email, status, updated_at)
       VALUES ($CUSTOMER_ID, '$FIRST_NAME', '$LAST_NAME', '$EMAIL', '$STATUS', now())
       ON CONFLICT (id) DO UPDATE
       SET first_name = EXCLUDED.first_name,
           last_name = EXCLUDED.last_name,
           email = EXCLUDED.email,
           status = EXCLUDED.status,
-          updated_at = now();"
+          updated_at = now();
+COMMIT;
+SQL
 
 echo "Waiting for CDC event in Kafka topic $TOPIC..."
 CONSUMER_OUTPUT="/tmp/ec2-cdc-to-kafka-$${CUSTOMER_ID}.jsonl"
@@ -206,19 +210,12 @@ EOF
 chmod +x /opt/lab/integration-test-cdc-to-kafka.sh
 
 # -------------------------------------------------------------------
-# On-prem emulator files: legacy PostgreSQL CDC -> Kafka -> Flink
+# Source emulator files: normalized PostgreSQL CDC -> Kafka -> Flink
 # -------------------------------------------------------------------
-mkdir -p /opt/lab/postgres/init /opt/lab/connectors /opt/lab/flink/sql
-mkdir -p /opt/lab/flink-usrlib/plugins/kafka
-
-curl -fL "https://repo1.maven.org/maven2/org/apache/flink/flink-connector-jdbc/3.2.0-1.19/flink-connector-jdbc-3.2.0-1.19.jar" \
-  -o /opt/lab/flink-usrlib/flink-connector-jdbc-3.2.0-1.19.jar
-curl -fL "https://repo1.maven.org/maven2/org/postgresql/postgresql/42.7.10/postgresql-42.7.10.jar" \
-  -o /opt/lab/flink-usrlib/postgresql-42.7.10.jar
-curl -fL "https://repo1.maven.org/maven2/org/apache/flink/flink-sql-connector-kafka/3.3.0-1.19/flink-sql-connector-kafka-3.3.0-1.19.jar" \
-  -o /opt/lab/flink-usrlib/plugins/kafka/flink-sql-connector-kafka-3.3.0-1.19.jar
-curl -fL "https://repo1.maven.org/maven2/org/apache/flink/flink-json/1.19.1/flink-json-1.19.1.jar" \
-  -o /opt/lab/flink-usrlib/plugins/kafka/flink-json-1.19.1.jar
+mkdir -p /opt/lab/postgres/init /opt/lab/connectors /opt/lab/flink-checkpoints
+chmod 0777 /opt/lab/flink-checkpoints
+mkdir -p /opt/lab/flink-usrlib
+aws s3 cp "s3://${projector_bucket}/${projector_key}" /opt/lab/flink-usrlib/transaction-projector-all.jar
 
 cat > /opt/lab/postgres/init/01-role-and-grants.sql <<'EOF'
 SELECT 'CREATE ROLE dbz WITH LOGIN PASSWORD ''dbz'' REPLICATION'
@@ -230,507 +227,17 @@ GRANT CONNECT, CREATE ON DATABASE appdb TO dbz;
 CREATE SCHEMA IF NOT EXISTS inventory AUTHORIZATION dbz;
 EOF
 
-cat > /opt/lab/postgres/init/02-inventory.sql <<'EOF'
-CREATE TABLE IF NOT EXISTS inventory.customers (
-  id BIGINT PRIMARY KEY,
-  first_name TEXT NOT NULL,
-  last_name TEXT NOT NULL,
-  email TEXT,
-  status TEXT NOT NULL DEFAULT 'ACTIVE',
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
+cat > /opt/lab/postgres/init/02-inventory.sql <<'SOURCE_INVENTORY_SQL'
+${source_inventory_sql}
+SOURCE_INVENTORY_SQL
 
-CREATE TABLE IF NOT EXISTS inventory.accounts (
-  account_id BIGINT PRIMARY KEY,
-  customer_id BIGINT,
-  account_type TEXT,
-  balance DECIMAL(15,2),
-  street TEXT,
-  city TEXT,
-  state TEXT,
-  zip_code TEXT,
-  home_phone TEXT,
-  work_phone TEXT,
-  mobile_phone TEXT,
-  created_at TIMESTAMPTZ DEFAULT now()
-);
+cat > /opt/lab/postgres/init/03-source-version-v2.sql <<'SOURCE_VERSION_SQL'
+${source_version_sql}
+SOURCE_VERSION_SQL
 
-CREATE TABLE IF NOT EXISTS inventory.orders_flat (
-  order_id BIGINT PRIMARY KEY,
-  customer_id BIGINT,
-  order_date TIMESTAMPTZ DEFAULT now(),
-  product_name TEXT,
-  product_category TEXT,
-  unit_price DECIMAL(10,2),
-  quantity INTEGER,
-  total_price DECIMAL(10,2)
-);
-
-ALTER TABLE inventory.customers REPLICA IDENTITY FULL;
-ALTER TABLE inventory.accounts REPLICA IDENTITY FULL;
-ALTER TABLE inventory.orders_flat REPLICA IDENTITY FULL;
-
-ALTER TABLE inventory.customers OWNER TO dbz;
-ALTER TABLE inventory.accounts OWNER TO dbz;
-ALTER TABLE inventory.orders_flat OWNER TO dbz;
-
-INSERT INTO inventory.customers (id, first_name, last_name, email, status)
-VALUES
-  (1, 'Alice', 'Smith', 'alice@example.com', 'ACTIVE'),
-  (2, 'Bob', 'Brown', 'bob@example.com', 'ACTIVE')
-ON CONFLICT (id) DO NOTHING;
-
-INSERT INTO inventory.accounts (
-  account_id, customer_id, account_type, balance, street, city, state,
-  zip_code, home_phone, work_phone, mobile_phone
-)
-VALUES
-  (101, 1, 'SAVINGS', 5500.00, '123 Maple St', 'Ridgewood', 'NJ', '07450', '201-555-0123', NULL, '201-555-4567'),
-  (102, 2, 'CHECKING', 1200.50, '456 Oak Ave', 'Paramus', 'NJ', '07652', '201-555-9999', NULL, NULL)
-ON CONFLICT (account_id) DO UPDATE
-SET account_type = EXCLUDED.account_type,
-    balance = EXCLUDED.balance,
-    street = EXCLUDED.street,
-    city = EXCLUDED.city,
-    state = EXCLUDED.state,
-    zip_code = EXCLUDED.zip_code,
-    home_phone = EXCLUDED.home_phone,
-    work_phone = EXCLUDED.work_phone,
-    mobile_phone = EXCLUDED.mobile_phone;
-
-INSERT INTO inventory.orders_flat (
-  order_id, customer_id, product_name, product_category, unit_price,
-  quantity, total_price
-)
-VALUES
-  (5001, 1, 'Wireless Headphones', 'Electronics', 150.00, 1, 150.00),
-  (5002, 1, 'USB-C Cable', 'Electronics', 25.00, 2, 50.00),
-  (5003, 2, 'Wireless Headphones', 'Electronics', 150.00, 1, 150.00)
-ON CONFLICT (order_id) DO UPDATE
-SET product_name = EXCLUDED.product_name,
-    product_category = EXCLUDED.product_category,
-    unit_price = EXCLUDED.unit_price,
-    quantity = EXCLUDED.quantity,
-    total_price = EXCLUDED.total_price;
-EOF
-
-cat > /opt/lab/connectors/legacy-postgres-source-config.json <<'EOF'
-{
-  "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
-  "tasks.max": "1",
-  "database.hostname": "legacy-postgres",
-  "database.port": "5432",
-  "database.user": "dbz",
-  "database.password": "dbz",
-  "database.dbname": "appdb",
-  "topic.prefix": "pg1",
-  "plugin.name": "pgoutput",
-  "schema.include.list": "inventory",
-  "table.include.list": "inventory.customers,inventory.accounts,inventory.orders_flat",
-  "slot.name": "dbz_slot",
-  "publication.autocreate.mode": "filtered",
-  "snapshot.mode": "initial",
-  "provide.transaction.metadata": "true",
-  "tombstones.on.delete": "false",
-  "decimal.handling.mode": "string",
-  "time.precision.mode": "adaptive_time_microseconds",
-  "key.converter": "org.apache.kafka.connect.json.JsonConverter",
-  "value.converter": "org.apache.kafka.connect.json.JsonConverter",
-  "key.converter.schemas.enable": "false",
-  "value.converter.schemas.enable": "false"
-}
-EOF
-
-cat > /opt/lab/flink/sql/init.sql <<'EOF'
-SET 'execution.checkpointing.interval' = '10s';
-
-CREATE TABLE customers_cdc (
-  `before` ROW<
-    id BIGINT,
-    first_name STRING,
-    last_name STRING,
-    email STRING,
-    status STRING,
-    created_at STRING,
-    updated_at STRING
-  >,
-  `after` ROW<
-    id BIGINT,
-    first_name STRING,
-    last_name STRING,
-    email STRING,
-    status STRING,
-    created_at STRING,
-    updated_at STRING
-  >,
-  op STRING,
-  ts_ms BIGINT,
-  `transaction` ROW<id STRING, total_order BIGINT, data_collection_order BIGINT>
-) WITH (
-  'connector' = 'kafka',
-  'topic' = 'pg1.inventory.customers',
-  'properties.bootstrap.servers' = 'kafka:29092',
-  'properties.isolation.level' = 'read_committed',
-  'scan.startup.mode' = 'earliest-offset',
-  'format' = 'json',
-  'json.ignore-parse-errors' = 'true'
-);
-
-CREATE TABLE accounts_cdc (
-  `before` ROW<
-    account_id BIGINT,
-    customer_id BIGINT,
-    account_type STRING,
-    balance DECIMAL(15,2),
-    street STRING,
-    city STRING,
-    state STRING,
-    zip_code STRING,
-    home_phone STRING,
-    work_phone STRING,
-    mobile_phone STRING,
-    created_at STRING
-  >,
-  `after` ROW<
-    account_id BIGINT,
-    customer_id BIGINT,
-    account_type STRING,
-    balance DECIMAL(15,2),
-    street STRING,
-    city STRING,
-    state STRING,
-    zip_code STRING,
-    home_phone STRING,
-    work_phone STRING,
-    mobile_phone STRING,
-    created_at STRING
-  >,
-  op STRING,
-  ts_ms BIGINT,
-  `transaction` ROW<id STRING, total_order BIGINT, data_collection_order BIGINT>
-) WITH (
-  'connector' = 'kafka',
-  'topic' = 'pg1.inventory.accounts',
-  'properties.bootstrap.servers' = 'kafka:29092',
-  'properties.isolation.level' = 'read_committed',
-  'scan.startup.mode' = 'earliest-offset',
-  'format' = 'json',
-  'json.ignore-parse-errors' = 'true'
-);
-
-CREATE TABLE orders_flat_cdc (
-  `before` ROW<
-    order_id BIGINT,
-    customer_id BIGINT,
-    order_date STRING,
-    product_name STRING,
-    product_category STRING,
-    unit_price DECIMAL(10,2),
-    quantity INT,
-    total_price DECIMAL(10,2)
-  >,
-  `after` ROW<
-    order_id BIGINT,
-    customer_id BIGINT,
-    order_date STRING,
-    product_name STRING,
-    product_category STRING,
-    unit_price DECIMAL(10,2),
-    quantity INT,
-    total_price DECIMAL(10,2)
-  >,
-  op STRING,
-  ts_ms BIGINT,
-  `transaction` ROW<id STRING, total_order BIGINT, data_collection_order BIGINT>
-) WITH (
-  'connector' = 'kafka',
-  'topic' = 'pg1.inventory.orders_flat',
-  'properties.bootstrap.servers' = 'kafka:29092',
-  'properties.isolation.level' = 'read_committed',
-  'scan.startup.mode' = 'earliest-offset',
-  'format' = 'json',
-  'json.ignore-parse-errors' = 'true'
-);
-
-CREATE TABLE client_customers_topic (
-  id BIGINT,
-  first_name STRING,
-  last_name STRING,
-  email STRING,
-  status STRING,
-  created_at TIMESTAMP(3),
-  updated_at TIMESTAMP(3),
-  source_record_type STRING,
-  source_ts_ms BIGINT,
-  source_tx_id STRING,
-  idempotency_key STRING,
-  source_tx_total_order BIGINT,
-  source_tx_data_collection_order BIGINT,
-  PRIMARY KEY (id) NOT ENFORCED
-) WITH (
-  'connector' = 'upsert-kafka',
-  'topic' = 'client.customers',
-  'properties.bootstrap.servers' = 'kafka:29092',
-  'properties.enable.idempotence' = 'true',
-  'properties.acks' = 'all',
-  'properties.retries' = '2147483647',
-  'properties.max.in.flight.requests.per.connection' = '5',
-  'sink.delivery-guarantee' = 'exactly-once',
-  'sink.transactional-id-prefix' = 'cloud-client-customers',
-  'key.format' = 'json',
-  'value.format' = 'json'
-);
-
-CREATE TABLE client_addresses_topic (
-  customer_id BIGINT,
-  address_type STRING,
-  street STRING,
-  city STRING,
-  state STRING,
-  zip_code STRING,
-  source_record_type STRING,
-  source_ts_ms BIGINT,
-  source_tx_id STRING,
-  idempotency_key STRING,
-  source_tx_total_order BIGINT,
-  source_tx_data_collection_order BIGINT,
-  PRIMARY KEY (customer_id, address_type) NOT ENFORCED
-) WITH (
-  'connector' = 'upsert-kafka',
-  'topic' = 'client.addresses',
-  'properties.bootstrap.servers' = 'kafka:29092',
-  'properties.enable.idempotence' = 'true',
-  'properties.acks' = 'all',
-  'properties.retries' = '2147483647',
-  'properties.max.in.flight.requests.per.connection' = '5',
-  'sink.delivery-guarantee' = 'exactly-once',
-  'sink.transactional-id-prefix' = 'cloud-client-addresses',
-  'key.format' = 'json',
-  'value.format' = 'json'
-);
-
-CREATE TABLE operational_products_topic (
-  name STRING,
-  category STRING,
-  current_price DECIMAL(10,2),
-  source_record_type STRING,
-  source_ts_ms BIGINT,
-  source_tx_id STRING,
-  idempotency_key STRING,
-  source_tx_total_order BIGINT,
-  source_tx_data_collection_order BIGINT,
-  PRIMARY KEY (name) NOT ENFORCED
-) WITH (
-  'connector' = 'upsert-kafka',
-  'topic' = 'operational.products',
-  'properties.bootstrap.servers' = 'kafka:29092',
-  'properties.enable.idempotence' = 'true',
-  'properties.acks' = 'all',
-  'properties.retries' = '2147483647',
-  'properties.max.in.flight.requests.per.connection' = '5',
-  'sink.delivery-guarantee' = 'exactly-once',
-  'sink.transactional-id-prefix' = 'cloud-operational-products',
-  'key.format' = 'json',
-  'value.format' = 'json'
-);
-
-CREATE TABLE operational_orders_topic (
-  id BIGINT,
-  customer_id BIGINT,
-  order_date TIMESTAMP(3),
-  status STRING,
-  source_record_type STRING,
-  source_ts_ms BIGINT,
-  source_tx_id STRING,
-  idempotency_key STRING,
-  source_tx_total_order BIGINT,
-  source_tx_data_collection_order BIGINT,
-  PRIMARY KEY (id) NOT ENFORCED
-) WITH (
-  'connector' = 'upsert-kafka',
-  'topic' = 'operational.orders',
-  'properties.bootstrap.servers' = 'kafka:29092',
-  'properties.enable.idempotence' = 'true',
-  'properties.acks' = 'all',
-  'properties.retries' = '2147483647',
-  'properties.max.in.flight.requests.per.connection' = '5',
-  'sink.delivery-guarantee' = 'exactly-once',
-  'sink.transactional-id-prefix' = 'cloud-operational-orders',
-  'key.format' = 'json',
-  'value.format' = 'json'
-);
-
-CREATE TABLE operational_order_items_topic (
-  order_id BIGINT,
-  product_name STRING,
-  quantity INT,
-  price_at_purchase DECIMAL(10,2),
-  source_record_type STRING,
-  source_ts_ms BIGINT,
-  source_tx_id STRING,
-  idempotency_key STRING,
-  source_tx_total_order BIGINT,
-  source_tx_data_collection_order BIGINT,
-  PRIMARY KEY (order_id, product_name) NOT ENFORCED
-) WITH (
-  'connector' = 'upsert-kafka',
-  'topic' = 'operational.order_items',
-  'properties.bootstrap.servers' = 'kafka:29092',
-  'properties.enable.idempotence' = 'true',
-  'properties.acks' = 'all',
-  'properties.retries' = '2147483647',
-  'properties.max.in.flight.requests.per.connection' = '5',
-  'sink.delivery-guarantee' = 'exactly-once',
-  'sink.transactional-id-prefix' = 'cloud-operational-order-items',
-  'key.format' = 'json',
-  'value.format' = 'json'
-);
-
-CREATE TABLE operational_contact_numbers_topic (
-  customer_id BIGINT,
-  phone_type STRING,
-  phone_number STRING,
-  source_record_type STRING,
-  source_ts_ms BIGINT,
-  source_tx_id STRING,
-  idempotency_key STRING,
-  source_tx_total_order BIGINT,
-  source_tx_data_collection_order BIGINT,
-  PRIMARY KEY (customer_id, phone_type) NOT ENFORCED
-) WITH (
-  'connector' = 'upsert-kafka',
-  'topic' = 'operational.contact_numbers',
-  'properties.bootstrap.servers' = 'kafka:29092',
-  'properties.enable.idempotence' = 'true',
-  'properties.acks' = 'all',
-  'properties.retries' = '2147483647',
-  'properties.max.in.flight.requests.per.connection' = '5',
-  'sink.delivery-guarantee' = 'exactly-once',
-  'sink.transactional-id-prefix' = 'cloud-operational-contact-numbers',
-  'key.format' = 'json',
-  'value.format' = 'json'
-);
-
-INSERT INTO client_customers_topic
-SELECT
-  COALESCE(`after`.id, `before`.id) AS id,
-  COALESCE(`after`.first_name, `before`.first_name) AS first_name,
-  COALESCE(`after`.last_name, `before`.last_name) AS last_name,
-  COALESCE(`after`.email, `before`.email) AS email,
-  COALESCE(`after`.status, `before`.status) AS status,
-  CAST(REPLACE(SUBSTRING(COALESCE(`after`.created_at, `before`.created_at), 1, 19), 'T', ' ') AS TIMESTAMP(3)) AS created_at,
-  CAST(REPLACE(SUBSTRING(COALESCE(`after`.updated_at, `before`.updated_at), 1, 19), 'T', ' ') AS TIMESTAMP(3)) AS updated_at,
-  CASE op WHEN 'c' THEN 'I' WHEN 'r' THEN 'I' WHEN 'u' THEN 'U' WHEN 'd' THEN 'D' ELSE op END AS source_record_type,
-  ts_ms AS source_ts_ms,
-  `transaction`.id AS source_tx_id,
-  CONCAT(COALESCE(`transaction`.id, 'no-tx'), '|', CAST(COALESCE(`transaction`.total_order, CAST(-1 AS BIGINT)) AS STRING), '|client.customers|', CAST(COALESCE(`after`.id, `before`.id) AS STRING)) AS idempotency_key,
-  `transaction`.total_order AS source_tx_total_order,
-  `transaction`.data_collection_order AS source_tx_data_collection_order
-FROM customers_cdc
-WHERE COALESCE(`after`.id, `before`.id) IS NOT NULL;
-
-INSERT INTO client_addresses_topic
-SELECT
-  COALESCE(`after`.customer_id, `before`.customer_id) AS customer_id,
-  'HOME' AS address_type,
-  COALESCE(`after`.street, `before`.street) AS street,
-  COALESCE(`after`.city, `before`.city) AS city,
-  COALESCE(`after`.state, `before`.state) AS state,
-  COALESCE(`after`.zip_code, `before`.zip_code) AS zip_code,
-  CASE op WHEN 'c' THEN 'I' WHEN 'r' THEN 'I' WHEN 'u' THEN 'U' WHEN 'd' THEN 'D' ELSE op END AS source_record_type,
-  ts_ms AS source_ts_ms,
-  `transaction`.id AS source_tx_id,
-  CONCAT(COALESCE(`transaction`.id, 'no-tx'), '|', CAST(COALESCE(`transaction`.total_order, CAST(-1 AS BIGINT)) AS STRING), '|client.addresses|customer_id=', CAST(COALESCE(`after`.customer_id, `before`.customer_id) AS STRING), '|address_type=HOME') AS idempotency_key,
-  `transaction`.total_order AS source_tx_total_order,
-  `transaction`.data_collection_order AS source_tx_data_collection_order
-FROM accounts_cdc
-WHERE COALESCE(`after`.street, `before`.street) IS NOT NULL;
-
-INSERT INTO operational_contact_numbers_topic
-SELECT
-  COALESCE(`after`.customer_id, `before`.customer_id) AS customer_id,
-  'HOME' AS phone_type,
-  COALESCE(`after`.home_phone, `before`.home_phone) AS phone_number,
-  CASE op WHEN 'c' THEN 'I' WHEN 'r' THEN 'I' WHEN 'u' THEN 'U' WHEN 'd' THEN 'D' ELSE op END AS source_record_type,
-  ts_ms AS source_ts_ms,
-  `transaction`.id AS source_tx_id,
-  CONCAT(COALESCE(`transaction`.id, 'no-tx'), '|', CAST(COALESCE(`transaction`.total_order, CAST(-1 AS BIGINT)) AS STRING), '|operational.contact_numbers|customer_id=', CAST(COALESCE(`after`.customer_id, `before`.customer_id) AS STRING), '|phone_type=HOME') AS idempotency_key,
-  `transaction`.total_order AS source_tx_total_order,
-  `transaction`.data_collection_order AS source_tx_data_collection_order
-FROM accounts_cdc
-WHERE COALESCE(`after`.home_phone, `before`.home_phone) IS NOT NULL
-UNION ALL
-SELECT
-  COALESCE(`after`.customer_id, `before`.customer_id) AS customer_id,
-  'WORK' AS phone_type,
-  COALESCE(`after`.work_phone, `before`.work_phone) AS phone_number,
-  CASE op WHEN 'c' THEN 'I' WHEN 'r' THEN 'I' WHEN 'u' THEN 'U' WHEN 'd' THEN 'D' ELSE op END AS source_record_type,
-  ts_ms AS source_ts_ms,
-  `transaction`.id AS source_tx_id,
-  CONCAT(COALESCE(`transaction`.id, 'no-tx'), '|', CAST(COALESCE(`transaction`.total_order, CAST(-1 AS BIGINT)) AS STRING), '|operational.contact_numbers|customer_id=', CAST(COALESCE(`after`.customer_id, `before`.customer_id) AS STRING), '|phone_type=WORK') AS idempotency_key,
-  `transaction`.total_order AS source_tx_total_order,
-  `transaction`.data_collection_order AS source_tx_data_collection_order
-FROM accounts_cdc
-WHERE COALESCE(`after`.work_phone, `before`.work_phone) IS NOT NULL
-UNION ALL
-SELECT
-  COALESCE(`after`.customer_id, `before`.customer_id) AS customer_id,
-  'MOBILE' AS phone_type,
-  COALESCE(`after`.mobile_phone, `before`.mobile_phone) AS phone_number,
-  CASE op WHEN 'c' THEN 'I' WHEN 'r' THEN 'I' WHEN 'u' THEN 'U' WHEN 'd' THEN 'D' ELSE op END AS source_record_type,
-  ts_ms AS source_ts_ms,
-  `transaction`.id AS source_tx_id,
-  CONCAT(COALESCE(`transaction`.id, 'no-tx'), '|', CAST(COALESCE(`transaction`.total_order, CAST(-1 AS BIGINT)) AS STRING), '|operational.contact_numbers|customer_id=', CAST(COALESCE(`after`.customer_id, `before`.customer_id) AS STRING), '|phone_type=MOBILE') AS idempotency_key,
-  `transaction`.total_order AS source_tx_total_order,
-  `transaction`.data_collection_order AS source_tx_data_collection_order
-FROM accounts_cdc
-WHERE COALESCE(`after`.mobile_phone, `before`.mobile_phone) IS NOT NULL;
-
-INSERT INTO operational_products_topic
-SELECT
-  COALESCE(`after`.product_name, `before`.product_name) AS name,
-  COALESCE(`after`.product_category, `before`.product_category) AS category,
-  COALESCE(`after`.unit_price, `before`.unit_price) AS current_price,
-  CASE op WHEN 'c' THEN 'I' WHEN 'r' THEN 'I' WHEN 'u' THEN 'U' WHEN 'd' THEN 'D' ELSE op END AS source_record_type,
-  ts_ms AS source_ts_ms,
-  `transaction`.id AS source_tx_id,
-  CONCAT(COALESCE(`transaction`.id, 'no-tx'), '|', CAST(COALESCE(`transaction`.total_order, CAST(-1 AS BIGINT)) AS STRING), '|operational.products|', COALESCE(`after`.product_name, `before`.product_name)) AS idempotency_key,
-  `transaction`.total_order AS source_tx_total_order,
-  `transaction`.data_collection_order AS source_tx_data_collection_order
-FROM orders_flat_cdc
-WHERE COALESCE(`after`.product_name, `before`.product_name) IS NOT NULL;
-
-INSERT INTO operational_orders_topic
-SELECT
-  COALESCE(`after`.order_id, `before`.order_id) AS id,
-  COALESCE(`after`.customer_id, `before`.customer_id) AS customer_id,
-  CAST(REPLACE(SUBSTRING(COALESCE(`after`.order_date, `before`.order_date), 1, 19), 'T', ' ') AS TIMESTAMP(3)) AS order_date,
-  'COMPLETED' AS status,
-  CASE op WHEN 'c' THEN 'I' WHEN 'r' THEN 'I' WHEN 'u' THEN 'U' WHEN 'd' THEN 'D' ELSE op END AS source_record_type,
-  ts_ms AS source_ts_ms,
-  `transaction`.id AS source_tx_id,
-  CONCAT(COALESCE(`transaction`.id, 'no-tx'), '|', CAST(COALESCE(`transaction`.total_order, CAST(-1 AS BIGINT)) AS STRING), '|operational.orders|', CAST(COALESCE(`after`.order_id, `before`.order_id) AS STRING)) AS idempotency_key,
-  `transaction`.total_order AS source_tx_total_order,
-  `transaction`.data_collection_order AS source_tx_data_collection_order
-FROM orders_flat_cdc
-WHERE COALESCE(`after`.order_id, `before`.order_id) IS NOT NULL;
-
-INSERT INTO operational_order_items_topic
-SELECT
-  COALESCE(`after`.order_id, `before`.order_id) AS order_id,
-  COALESCE(`after`.product_name, `before`.product_name) AS product_name,
-  COALESCE(`after`.quantity, `before`.quantity) AS quantity,
-  COALESCE(`after`.unit_price, `before`.unit_price) AS price_at_purchase,
-  CASE op WHEN 'c' THEN 'I' WHEN 'r' THEN 'I' WHEN 'u' THEN 'U' WHEN 'd' THEN 'D' ELSE op END AS source_record_type,
-  ts_ms AS source_ts_ms,
-  `transaction`.id AS source_tx_id,
-  CONCAT(COALESCE(`transaction`.id, 'no-tx'), '|', CAST(COALESCE(`transaction`.total_order, CAST(-1 AS BIGINT)) AS STRING), '|operational.order_items|order_id=', CAST(COALESCE(`after`.order_id, `before`.order_id) AS STRING), '|product_name=', COALESCE(`after`.product_name, `before`.product_name)) AS idempotency_key,
-  `transaction`.total_order AS source_tx_total_order,
-  `transaction`.data_collection_order AS source_tx_data_collection_order
-FROM orders_flat_cdc
-WHERE COALESCE(`after`.product_name, `before`.product_name) IS NOT NULL;
-EOF
+cat > /opt/lab/connectors/source-version-v2-config.json <<'SOURCE_V2_CONNECTOR'
+${source_version_connector_json}
+SOURCE_V2_CONNECTOR
 
 # -------------------------------------------------------------------
 # /opt/lab/mm2.properties (Serverless MSK IAM + MM2 lab-safe)
@@ -855,6 +362,28 @@ services:
       timeout: 10s
       retries: 30
 
+  kafka-topics-init:
+    image: confluentinc/cp-kafka:7.7.7
+    networks: [cdc]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: ["/bin/bash", "-ec"]
+    command: |
+      for spec in \
+        'cdc.source.capture.v2:1:delete:604800000' \
+        'cdc.source.baseline.control.v2:1:compact:2592000000' \
+        'cdc.tx.control.v2:12:delete:2592000000' \
+        'cdc.tx.mutations.v2:12:delete:2592000000' \
+        'cdc.tx.baseline.v2:1:compact:2592000000' \
+        'cdc.tx.dlq.v2:3:delete:7776000000'; do
+        IFS=: read -r topic partitions policy retention <<<"$$spec"
+        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists \
+          --topic "$$topic" --partitions "$$partitions" --replication-factor 1 \
+          --config cleanup.policy="$$policy" --config retention.ms="$$retention"
+      done
+
   legacy-postgres:
     image: postgres:16-alpine
     hostname: legacy-postgres
@@ -897,9 +426,20 @@ services:
     command:
       - |
         set -e
-        echo "Running legacy PostgreSQL init SQL..."
-        PGPASSWORD=postgres psql -v ON_ERROR_STOP=1 -h legacy-postgres -U postgres -d appdb -f /init/01-role-and-grants.sql
-        PGPASSWORD=postgres psql -v ON_ERROR_STOP=1 -h legacy-postgres -U postgres -d appdb -f /init/02-inventory.sql
+        echo "Running normalized PostgreSQL init SQL..."
+        schema_exists=$$(PGPASSWORD=postgres psql -v ON_ERROR_STOP=1 -h legacy-postgres -U postgres -d appdb -Atqc "SELECT to_regclass('source_cdc.schema_version') IS NOT NULL")
+        if [ "$$schema_exists" != "t" ]; then
+          PGPASSWORD=postgres psql -v ON_ERROR_STOP=1 -h legacy-postgres -U postgres -d appdb -f /init/01-role-and-grants.sql
+          PGPASSWORD=postgres psql -v ON_ERROR_STOP=1 -h legacy-postgres -U postgres -d appdb -f /init/02-inventory.sql
+          PGPASSWORD=postgres psql -v ON_ERROR_STOP=1 -h legacy-postgres -U postgres -d appdb -f /init/03-source-version-v2.sql
+        else
+          installed=$$(PGPASSWORD=postgres psql -v ON_ERROR_STOP=1 -h legacy-postgres -U postgres -d appdb -Atqc "SELECT count(*) FROM source_cdc.schema_version WHERE version=3")
+          if [ "$$installed" != "1" ]; then
+            echo "Incompatible source volume; recreate it to install the normalized source schema." >&2
+            exit 1
+          fi
+          echo "Normalized source schema already installed; skipping seed SQL."
+        fi
         echo "pg-init done."
 
   connect:
@@ -910,6 +450,8 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+      kafka-topics-init:
+        condition: service_completed_successfully
       pg-init:
         condition: service_completed_successfully
     ports:
@@ -930,6 +472,7 @@ services:
       VALUE_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
       KEY_CONVERTER_SCHEMAS_ENABLE: "false"
       VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECTOR_CLIENT_CONFIG_OVERRIDE_POLICY: "All"
       REST_HOST_NAME: "0.0.0.0"
       REST_ADVERTISED_HOST_NAME: "connect"
     healthcheck:
@@ -954,15 +497,15 @@ services:
         status=$$(curl -sS -o /tmp/connect-response.txt -w "%%{http_code}" \
           -X PUT \
           -H "Content-Type: application/json" \
-          --data @/connectors/legacy-postgres-source-config.json \
-          http://connect:8083/connectors/legacy-postgres-source/config)
+          --data @/connectors/source-version-v2-config.json \
+          http://connect:8083/connectors/source-version-v2/config)
         cat /tmp/connect-response.txt
         echo
         if [ "$$status" -lt 200 ] || [ "$$status" -ge 300 ]; then
           echo "Connector registration failed with HTTP $$status" >&2
           exit 1
         fi
-        curl -sS http://connect:8083/connectors/legacy-postgres-source/status
+        curl -sS http://connect:8083/connectors/source-version-v2/status
         echo
 
   flink-jobmanager:
@@ -972,21 +515,23 @@ services:
     networks: [cdc]
     ports:
       - "8081:8081"
-    command: >
-      bash -lc "cp -n /opt/flink/usrlib/plugins/kafka/*.jar /opt/flink/lib/ 2>/dev/null || true;
-                cp -n /opt/flink/usrlib/*.jar /opt/flink/lib/ 2>/dev/null || true;
-                exec /docker-entrypoint.sh jobmanager"
+    command: jobmanager
     environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      CAPTURE_TOPIC: cdc.source.capture.v2
+      SOURCE_DATABASE_ID: legacy-postgres
+      SOURCE_INCARNATION: aws-1
+      CAPTURE_SCOPE_ID: inventory-direct-v2
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: flink-jobmanager
         taskmanager.numberOfTaskSlots: 24
         parallelism.default: 1
         state.backend.type: hashmap
         execution.checkpointing.interval: 10s
+        execution.checkpointing.dir: file:///opt/flink/checkpoints
     volumes:
-      - ./flink/sql/init.sql:/opt/flink/init.sql:ro
-      - ./flink-usrlib/plugins:/opt/flink/plugins:ro
       - ./flink-usrlib:/opt/flink/usrlib:ro
+      - ./flink-checkpoints:/opt/flink/checkpoints
 
   flink-taskmanager:
     image: flink:1.19.1-scala_2.12-java17
@@ -995,20 +540,23 @@ services:
     networks: [cdc]
     depends_on:
       - flink-jobmanager
-    command: >
-      bash -lc "cp -n /opt/flink/usrlib/plugins/kafka/*.jar /opt/flink/lib/ 2>/dev/null || true;
-                cp -n /opt/flink/usrlib/*.jar /opt/flink/lib/ 2>/dev/null || true;
-                exec /docker-entrypoint.sh taskmanager"
+    command: taskmanager
     environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      CAPTURE_TOPIC: cdc.source.capture.v2
+      SOURCE_DATABASE_ID: legacy-postgres
+      SOURCE_INCARNATION: aws-1
+      CAPTURE_SCOPE_ID: inventory-direct-v2
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: flink-jobmanager
         taskmanager.numberOfTaskSlots: 24
         parallelism.default: 1
         state.backend.type: hashmap
         execution.checkpointing.interval: 10s
+        execution.checkpointing.dir: file:///opt/flink/checkpoints
     volumes:
-      - ./flink-usrlib/plugins:/opt/flink/plugins:ro
       - ./flink-usrlib:/opt/flink/usrlib:ro
+      - ./flink-checkpoints:/opt/flink/checkpoints
 
   flink-sql-init:
     image: flink:1.19.1-scala_2.12-java17
@@ -1021,17 +569,21 @@ services:
       flink-taskmanager:
         condition: service_started
     restart: "no"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      CAPTURE_TOPIC: cdc.source.capture.v2
+      SOURCE_DATABASE_ID: legacy-postgres
+      SOURCE_INCARNATION: aws-1
+      CAPTURE_SCOPE_ID: inventory-direct-v2
     volumes:
-      - ./flink/sql/init.sql:/opt/flink/init.sql:ro
-      - ./flink-usrlib/plugins:/opt/flink/plugins:ro
       - ./flink-usrlib:/opt/flink/usrlib:ro
     command: >
       bash -lc "
         set -e;
         until (echo > /dev/tcp/flink-jobmanager/8081) >/dev/null 2>&1; do sleep 1; done;
-        cp -n /opt/flink/usrlib/plugins/kafka/*.jar /opt/flink/lib/ 2>/dev/null || true;
-        cp -n /opt/flink/usrlib/*.jar /opt/flink/lib/ 2>/dev/null || true;
-        /opt/flink/bin/sql-client.sh -f /opt/flink/init.sql -Drest.address=flink-jobmanager -Drest.port=8081;
+        /opt/flink/bin/flink run -d -m flink-jobmanager:8081 \
+          -c com.example.cdc.projector.TransactionProjectorJob \
+          /opt/flink/usrlib/transaction-projector-all.jar;
       "
 
   kafka-ui:

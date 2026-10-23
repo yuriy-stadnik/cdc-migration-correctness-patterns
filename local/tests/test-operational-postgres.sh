@@ -1,33 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
-
-require_container_running local-cloud-operational-postgres
-docker exec local-cloud-operational-postgres pg_isready -U appuser -d operationaldb >/dev/null
-
-require_sql_count local-cloud-operational-postgres operationaldb 1 "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'operational' AND table_name = 'products'"
-require_sql_count local-cloud-operational-postgres operationaldb 1 "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'operational' AND table_name = 'orders'"
-require_sql_count local-cloud-operational-postgres operationaldb 1 "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'operational' AND table_name = 'order_items'"
-require_sql_count local-cloud-operational-postgres operationaldb 1 "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'operational' AND table_name = 'contact_numbers'"
-require_sql_count local-cloud-operational-postgres operationaldb 1 "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'operational' AND table_name = 'orders' AND column_name = 'source_tx_id'"
-require_sql_count local-cloud-operational-postgres operationaldb 1 "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'operational' AND table_name = 'orders' AND column_name = 'idempotency_key' AND data_type = 'character varying'"
-require_sql_count local-cloud-operational-postgres operationaldb 1 "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'cdc' AND table_name = 'transaction_metadata'"
-require_sql_count local-cloud-operational-postgres operationaldb 1 "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'cdc' AND table_name = 'processed_events'"
-require_sql_count local-cloud-operational-postgres operationaldb 1 "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'cdc' AND table_name = 'postponed_fk_events'"
-require_sql_count local-cloud-operational-postgres operationaldb 1 "SELECT count(*) FROM information_schema.table_constraints WHERE table_schema = 'cdc' AND table_name = 'processed_events' AND constraint_type = 'PRIMARY KEY'"
-require_sql_count local-cloud-operational-postgres operationaldb 1 "SELECT count(*) FROM information_schema.table_constraints WHERE table_schema = 'operational' AND table_name = 'order_items' AND constraint_name = 'fk__operational.order_items__operational.orders' AND constraint_type = 'FOREIGN KEY'"
-require_sql_count local-cloud-operational-postgres operationaldb 1 "SELECT count(*) FROM information_schema.table_constraints WHERE table_schema = 'operational' AND table_name = 'order_items' AND constraint_name = 'fk__operational.order_items__operational.products' AND constraint_type = 'FOREIGN KEY'"
-
-docker exec -i local-cloud-operational-postgres psql -U appuser -d operationaldb <<'SQL'
-SELECT 'products' AS table_name, count(*) FROM operational.products
-UNION ALL SELECT 'orders', count(*) FROM operational.orders
-UNION ALL SELECT 'order_items', count(*) FROM operational.order_items
-UNION ALL SELECT 'contact_numbers', count(*) FROM operational.contact_numbers
-UNION ALL SELECT 'processed_events', count(*) FROM cdc.processed_events
-UNION ALL SELECT 'postponed_fk_events', count(*) FROM cdc.postponed_fk_events
-UNION ALL SELECT 'transaction_metadata', count(*) FROM cdc.transaction_metadata
-ORDER BY table_name;
-SQL
-
-echo "operational-postgres: ok"
+require_container_running local-cloud-destination-postgres
+for table in products orders order_items contact_numbers; do
+  require_sql_count local-cloud-destination-postgres destinationdb 1 "SELECT count(*) FROM information_schema.tables WHERE table_schema='operational' AND table_name='${table}'"
+  require_sql_count local-cloud-destination-postgres destinationdb 1 "SELECT count(*) FROM information_schema.columns WHERE table_schema='operational' AND table_name='${table}' AND column_name='version'"
+  require_sql_count local-cloud-destination-postgres destinationdb 0 "SELECT count(*) FROM information_schema.columns WHERE table_schema='operational' AND table_name='${table}' AND column_name='cdc_version'"
+done
+echo "destination-postgres operational schema: ok"

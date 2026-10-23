@@ -43,8 +43,7 @@ resource "aws_iam_role_policy" "lambda_secrets" {
         Effect = "Allow",
         Action = ["secretsmanager:GetSecretValue"],
         Resource = [
-          try(aws_rds_cluster.aurora_client.master_user_secret[0].secret_arn, "*"),
-          try(aws_rds_cluster.aurora_operational.master_user_secret[0].secret_arn, "*")
+          try(aws_rds_cluster.aurora_destination.master_user_secret[0].secret_arn, "*")
         ]
       },
       {
@@ -86,7 +85,7 @@ resource "aws_lambda_function" "consumer" {
   runtime = "java17"
   handler = "com.example.Handler::handleRequest"
 
-  timeout     = 30
+  timeout     = 60
   memory_size = 1024
 
   filename         = "${path.module}/lambda_java/build/libs/msk-to-aurora-lambda-1.0.0.jar"
@@ -99,35 +98,47 @@ resource "aws_lambda_function" "consumer" {
 
   environment {
     variables = {
-      CLIENT_DB_HOST            = aws_rds_cluster.aurora_client.endpoint
-      CLIENT_DB_PORT            = "5432"
-      CLIENT_DB_NAME            = var.client_db_name
-      CLIENT_DB_USER            = var.db_username
-      CLIENT_DB_SECRET_ARN      = try(aws_rds_cluster.aurora_client.master_user_secret[0].secret_arn, "")
-      OPERATIONAL_DB_HOST       = aws_rds_cluster.aurora_operational.endpoint
-      OPERATIONAL_DB_PORT       = "5432"
-      OPERATIONAL_DB_NAME       = var.operational_db_name
-      OPERATIONAL_DB_USER       = var.db_username
-      OPERATIONAL_DB_SECRET_ARN = try(aws_rds_cluster.aurora_operational.master_user_secret[0].secret_arn, "")
+      DESTINATION_DB_HOST             = aws_rds_cluster.aurora_destination.endpoint
+      DESTINATION_DB_PORT             = "5432"
+      DESTINATION_DB_NAME             = var.destination_db_name
+      DESTINATION_DB_USER             = var.db_username
+      DESTINATION_DB_SECRET_ARN       = try(aws_rds_cluster.aurora_destination.master_user_secret[0].secret_arn, "")
+      MAX_TRANSACTIONS_PER_INVOCATION = "20"
     }
   }
 
   depends_on = [
-    aws_rds_cluster_instance.aurora_client_instance,
-    aws_rds_cluster_instance.aurora_operational_instance
+    aws_rds_cluster_instance.aurora_destination_instance
   ]
 }
 
 locals {
   lambda_msk_topics = toset([
-    "pg1.transaction",
-    "client.customers",
-    "client.addresses",
-    "operational.products",
-    "operational.orders",
-    "operational.order_items",
-    "operational.contact_numbers"
+    "cdc.tx.control.v2",
+    "cdc.tx.mutations.v2",
+    "cdc.tx.dlq.v2"
   ])
+}
+
+# A new Kafka event is not required to make a backoff-expired transaction READY again.
+resource "aws_cloudwatch_event_rule" "transaction_retry_sweep" {
+  name                = "${var.project}-transaction-retry-sweep"
+  schedule_expression = "rate(1 minute)"
+}
+
+resource "aws_cloudwatch_event_target" "transaction_retry_sweep" {
+  rule      = aws_cloudwatch_event_rule.transaction_retry_sweep.name
+  target_id = "transaction-apply-lambda"
+  arn       = aws_lambda_function.consumer.arn
+  input     = "{}"
+}
+
+resource "aws_lambda_permission" "transaction_retry_sweep" {
+  statement_id  = "AllowEventBridgeTransactionSweep"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.consumer.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.transaction_retry_sweep.arn
 }
 
 # MSK -> Lambda triggers. Lambda supports one Kafka topic per event source mapping.

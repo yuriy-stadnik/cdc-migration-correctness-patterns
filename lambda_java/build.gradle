@@ -1,6 +1,5 @@
 plugins {
     id 'java'
-    id 'com.github.johnrengelman.shadow' version '8.1.1'
 }
 
 group = 'com.cd ..'
@@ -17,6 +16,8 @@ repositories {
 }
 
 dependencies {
+    implementation 'com.example.cdc:transaction-protocol:1.0.0'
+    implementation 'com.example.cdc:transaction-apply:1.0.0'
     // Lambda core + events (MSK event)
     implementation 'com.amazonaws:aws-lambda-java-core:1.2.3'
     implementation 'com.amazonaws:aws-lambda-java-events:3.11.5'
@@ -40,9 +41,13 @@ tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
 }
 
-shadowJar {
-    archiveClassifier.set("") // produce msk-to-aurora-lambda-1.0.0.jar
-    mergeServiceFiles()
+tasks.register('shadowJar', Jar) {
+    archiveFileName.set('msk-to-aurora-lambda-1.0.0.jar')
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    from sourceSets.main.output
+    dependsOn configurations.runtimeClasspath
+    from { configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) } }
+    exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA'
 }
 
 tasks.build {

@@ -34,7 +34,7 @@ variable "ec2_msk_bootstrap_iam" {
 variable "mm2_topic_allowlist_regex" {
   description = "Regex for MM2 source->target topic replication when MSK replication is enabled."
   type        = string
-  default     = "(operational[.].*|client[.].*|pg1[.]transaction)"
+  default     = "cdc[.]tx[.](control|mutations|dlq)[.]v2"
 }
 
 variable "mm2_group_allowlist_regex" {
@@ -66,15 +66,21 @@ variable "db_username" {
 }
 
 variable "client_db_name" {
-  description = "Aurora database name for client projection data."
+  description = "Deprecated compatibility input; transaction protocol uses destination_db_name."
   type        = string
   default     = "clientdb"
 }
 
 variable "operational_db_name" {
-  description = "Aurora database name for operational projection data."
+  description = "Deprecated compatibility input; transaction protocol uses destination_db_name."
   type        = string
   default     = "operationaldb"
+}
+
+variable "destination_db_name" {
+  description = "Single logical Aurora database containing client, operational, and CDC schemas."
+  type        = string
+  default     = "destinationdb"
 }
 
 variable "aurora_instance_class" {

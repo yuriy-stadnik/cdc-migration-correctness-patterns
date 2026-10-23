@@ -9,8 +9,8 @@ They avoid direct local connections to MSK and Aurora. Local commands use Terraf
 ```text
 AWS_REGION=us-east-1
 KEY_PATH=$HOME/.ssh/temp_ec2_key
-CLIENT_DB_NAME=clientdb
-OPERATIONAL_DB_NAME=operationaldb
+CLIENT_DB_NAME=destinationdb
+OPERATIONAL_DB_NAME=destinationdb
 ```
 
 Override any value with environment variables:
@@ -33,7 +33,7 @@ AWS_REGION=us-east-1 KEY_PATH=~/.ssh/temp_ec2_key scripts/ops/msk/list-topics.sh
 ```bash
 scripts/ops/source-postgres/list-tables.sh
 scripts/ops/source-kafka/list-topics.sh
-scripts/ops/msk/consume-topic.sh operational.contact_numbers 20
+scripts/ops/msk/consume-topic.sh cdc.tx.mutations.v2 20
 scripts/ops/aurora-client/list-tables.sh
 scripts/ops/aurora-operational/query.sh "SELECT count(*) FROM operational.orders;"
 scripts/ops/containers/status.sh

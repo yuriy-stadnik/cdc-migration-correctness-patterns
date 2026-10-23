@@ -5,16 +5,11 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 require_container_running local-source-flink-jobmanager
 require_container_running local-source-flink-taskmanager
-grep -F "'properties.isolation.level' = 'read_committed'" local/source/flink/sql/init.sql >/dev/null
-grep -F "'properties.enable.idempotence' = 'true'" local/source/flink/sql/init.sql >/dev/null
-grep -F "'properties.acks' = 'all'" local/source/flink/sql/init.sql >/dev/null
-grep -F "'properties.retries' = '2147483647'" local/source/flink/sql/init.sql >/dev/null
-grep -F "'properties.max.in.flight.requests.per.connection' = '5'" local/source/flink/sql/init.sql >/dev/null
-grep -F "'sink.delivery-guarantee' = 'exactly-once'" local/source/flink/sql/init.sql >/dev/null
-grep -F "'sink.transactional-id-prefix' = 'local-client-customers'" local/source/flink/sql/init.sql >/dev/null
-grep -F "CONCAT(COALESCE(\`transaction\`.id, 'no-tx')" local/source/flink/sql/init.sql >/dev/null
+test -f transaction-projector/build/libs/transaction-projector-all.jar
+grep -F 'DeliveryGuarantee.EXACTLY_ONCE' transaction-projector/src/main/java/com/example/cdc/projector/TransactionProjectorJob.java >/dev/null
+grep -F 'FOR UPDATE SKIP LOCKED' transaction-apply/src/main/java/com/example/cdc/apply/V2TransactionApplyService.java >/dev/null
 
-curl -fsS http://localhost:8081/jobs | grep -F '"jobs"' >/dev/null
+curl -fsS http://localhost:8081/jobs | grep -F 'transaction-preserving-cdc-projector' >/dev/null
 
 curl -fsS http://localhost:8081/jobs
 echo

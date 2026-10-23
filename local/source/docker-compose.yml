@@ -8,6 +8,7 @@ volumes:
   source-zookeeper-data: {}
   source-zookeeper-log: {}
   source-kafka-data: {}
+  source-flink-checkpoints: {}
 
 services:
   source-zookeeper:
@@ -92,6 +93,8 @@ services:
     depends_on:
       source-kafka:
         condition: service_healthy
+      source-topics-init:
+        condition: service_completed_successfully
       source-postgres:
         condition: service_healthy
     ports:
@@ -112,6 +115,7 @@ services:
       VALUE_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
       KEY_CONVERTER_SCHEMAS_ENABLE: "false"
       VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECTOR_CLIENT_CONFIG_OVERRIDE_POLICY: "All"
       REST_HOST_NAME: "0.0.0.0"
       REST_ADVERTISED_HOST_NAME: "source-connect"
     healthcheck:
@@ -119,6 +123,30 @@ services:
       interval: 10s
       timeout: 5s
       retries: 30
+
+  source-topics-init:
+    image: confluentinc/cp-kafka:7.7.7
+    container_name: local-source-topics-init
+    networks: [cdc-migration-local]
+    depends_on:
+      source-kafka:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: ["/bin/bash", "-ec"]
+    command:
+      - |
+        for spec in \
+          'cdc.source.capture.v2:1:delete:604800000' \
+          'cdc.source.baseline.control.v2:1:compact:2592000000' \
+          'cdc.tx.control.v2:12:delete:2592000000' \
+          'cdc.tx.mutations.v2:12:delete:2592000000' \
+          'cdc.tx.baseline.v2:1:compact:2592000000' \
+          'cdc.tx.dlq.v2:3:delete:7776000000'; do
+          IFS=: read -r topic partitions policy retention <<<"$$spec"
+          kafka-topics --bootstrap-server source-kafka:29092 --create --if-not-exists \
+            --topic "$$topic" --partitions "$$partitions" --replication-factor 1 \
+            --config cleanup.policy="$$policy" --config retention.ms="$$retention"
+        done
 
   source-dbz-init:
     image: curlimages/curl:8.7.1
@@ -137,27 +165,28 @@ services:
         status=$$(curl -sS -o /tmp/connect-response.txt -w "%{http_code}" \
           -X PUT \
           -H "Content-Type: application/json" \
-          --data @/connectors/legacy-postgres-source-config.json \
-          http://source-connect:8083/connectors/legacy-postgres-source/config)
+          --data @/connectors/source-version-v2-config.json \
+          http://source-connect:8083/connectors/source-version-v2/config)
         cat /tmp/connect-response.txt
         echo
         if [ "$$status" -lt 200 ] || [ "$$status" -ge 300 ]; then
           echo "Connector registration failed with HTTP $$status" >&2
           exit 1
         fi
-        curl -sS http://source-connect:8083/connectors/legacy-postgres-source/status
+        curl -sS http://source-connect:8083/connectors/source-version-v2/status
         echo
 
   source-flink-jobmanager:
-    image: flink:1.19.1-scala_2.12-java17
+    build:
+      context: ../..
+      dockerfile: transaction-projector/Dockerfile
+    image: local-transaction-projector:latest
     hostname: source-flink-jobmanager
     container_name: local-source-flink-jobmanager
     networks: [cdc-migration-local]
     ports:
       - "8081:8081"
-    command: >
-      bash -lc "cp -n /opt/flink/usrlib/plugins/kafka/*.jar /opt/flink/lib/ 2>/dev/null || true;
-                exec /docker-entrypoint.sh jobmanager"
+    command: jobmanager
     environment:
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: source-flink-jobmanager
@@ -165,21 +194,18 @@ services:
         parallelism.default: 1
         state.backend.type: hashmap
         execution.checkpointing.interval: 10s
+        state.checkpoints.dir: file:///opt/flink/checkpoints
     volumes:
-      - ./flink/sql/init.sql:/opt/flink/init.sql:ro
-      - ../flink-usrlib/plugins:/opt/flink/plugins:ro
-      - ../flink-usrlib:/opt/flink/usrlib:ro
+      - source-flink-checkpoints:/opt/flink/checkpoints
 
   source-flink-taskmanager:
-    image: flink:1.19.1-scala_2.12-java17
+    image: local-transaction-projector:latest
     hostname: source-flink-taskmanager
     container_name: local-source-flink-taskmanager
     networks: [cdc-migration-local]
     depends_on:
       - source-flink-jobmanager
-    command: >
-      bash -lc "cp -n /opt/flink/usrlib/plugins/kafka/*.jar /opt/flink/lib/ 2>/dev/null || true;
-                exec /docker-entrypoint.sh taskmanager"
+    command: taskmanager
     environment:
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: source-flink-jobmanager
@@ -187,12 +213,12 @@ services:
         parallelism.default: 1
         state.backend.type: hashmap
         execution.checkpointing.interval: 10s
+        state.checkpoints.dir: file:///opt/flink/checkpoints
     volumes:
-      - ../flink-usrlib/plugins:/opt/flink/plugins:ro
-      - ../flink-usrlib:/opt/flink/usrlib:ro
+      - source-flink-checkpoints:/opt/flink/checkpoints
 
   source-flink-sql-init:
-    image: flink:1.19.1-scala_2.12-java17
+    image: local-transaction-projector:latest
     container_name: local-source-flink-sql-init
     networks: [cdc-migration-local]
     depends_on:
@@ -203,23 +229,28 @@ services:
       source-flink-taskmanager:
         condition: service_started
     restart: "no"
-    volumes:
-      - ./flink/sql/init.sql:/opt/flink/init.sql:ro
-      - ../flink-usrlib/plugins:/opt/flink/plugins:ro
-      - ../flink-usrlib:/opt/flink/usrlib:ro
-    command: >
-      bash -lc "
-        set -e;
-        until (echo > /dev/tcp/source-flink-jobmanager/8081) >/dev/null 2>&1; do sleep 1; done;
-        cp -n /opt/flink/usrlib/plugins/kafka/*.jar /opt/flink/lib/ 2>/dev/null || true;
-        cp -n /opt/flink/usrlib/*.jar /opt/flink/lib/ 2>/dev/null || true;
-        /opt/flink/bin/sql-client.sh -f /opt/flink/init.sql -Drest.address=source-flink-jobmanager -Drest.port=8081;
-      "
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: source-kafka:29092
+      CAPTURE_TOPIC: cdc.source.capture.v2
+      SOURCE_DATABASE_ID: legacy-postgres
+      SOURCE_INCARNATION: local-1
+      CAPTURE_SCOPE_ID: inventory-direct-v2
+    command:
+      - bash
+      - -lc
+      - |
+        set -e
+        until (echo > /dev/tcp/source-flink-jobmanager/8081) >/dev/null 2>&1; do sleep 1; done
+        /opt/flink/bin/flink run -d -m source-flink-jobmanager:8081 \
+          -c com.example.cdc.projector.TransactionProjectorJob \
+          /opt/flink/usrlib/transaction-projector-all.jar
 
   source-mirrormaker2:
     image: confluentinc/cp-kafka-connect:7.8.0
     container_name: local-source-mirrormaker2
     networks: [cdc-migration-local]
+    environment:
+      KAFKA_LOG4J_OPTS: -Dlog4j.configuration=file:/etc/kafka/connect-log4j.properties
     depends_on:
       source-kafka:
         condition: service_healthy

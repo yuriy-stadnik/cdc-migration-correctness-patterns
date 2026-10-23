@@ -106,6 +106,11 @@ resource "aws_iam_instance_profile" "ec2" {
 }
 
 resource "aws_instance" "kafka_mm2" {
+  depends_on = [
+    aws_iam_role_policy.ec2_artifact_read,
+    aws_s3_object.transaction_projector
+  ]
+
   ami                         = data.aws_ami.al2.id
   instance_type               = var.ec2_instance_type
   subnet_id                   = aws_subnet.public[0].id
@@ -113,10 +118,15 @@ resource "aws_instance" "kafka_mm2" {
   vpc_security_group_ids      = [aws_security_group.ec2.id]
   iam_instance_profile        = aws_iam_instance_profile.ec2.name
   user_data_base64 = base64gzip(templatefile("${path.module}/user_data.sh.tpl", {
-    msk_bootstrap_iam   = var.ec2_msk_bootstrap_iam
-    mm2_topic_allowlist = var.mm2_topic_allowlist_regex
-    mm2_group_allowlist = var.mm2_group_allowlist_regex
-    region              = var.aws_region
+    msk_bootstrap_iam             = var.ec2_msk_bootstrap_iam
+    mm2_topic_allowlist           = var.mm2_topic_allowlist_regex
+    mm2_group_allowlist           = var.mm2_group_allowlist_regex
+    region                        = var.aws_region
+    projector_bucket              = aws_s3_bucket.cdc_artifacts.id
+    projector_key                 = aws_s3_object.transaction_projector.key
+    source_inventory_sql          = file("${path.module}/local/postgres/init/02-inventory.sql")
+    source_version_sql            = file("${path.module}/local/postgres/init/03-source-version-v2.sql")
+    source_version_connector_json = replace(file("${path.module}/local/source/connectors/source-version-v2-config.json"), "source-postgres", "legacy-postgres")
   }))
 
   root_block_device {
