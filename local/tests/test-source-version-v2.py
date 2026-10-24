@@ -70,7 +70,8 @@ def initialize():
 def test_normalized_schema_and_capture_contract():
     tables = set(psql("SELECT table_name FROM information_schema.tables "
                       "WHERE table_schema='inventory' ORDER BY table_name").splitlines())
-    assert tables == {"customers", "addresses", "contact_numbers", "products", "orders", "order_items"}
+    assert tables == {"customers", "products", "orders", "order_items"}
+    eq("SELECT count(*) FROM inventory.customers", 0)
     assert query("SELECT to_regnamespace('source_projection') IS NULL") == "t"
     assert query("SELECT to_regclass('source_cdc.dirty_owner') IS NULL") == "t"
     assert query("SELECT to_regclass('source_cdc.contribution') IS NULL") == "t"
@@ -88,8 +89,8 @@ def test_normalized_schema_and_capture_contract():
     assert configured == published, (configured - published, published - configured)
     eq("SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
        "WHERE n.nspname='inventory' AND c.relname IN "
-       "('customers','addresses','contact_numbers','products','orders','order_items') "
-       "AND c.relreplident='f'", 6)
+       "('customers','products','orders','order_items') "
+       "AND c.relreplident='f'", 4)
 
 
 def test_permissions_and_rollback():
@@ -130,10 +131,6 @@ def test_versions_and_lifecycle():
 def test_each_source_row_owns_one_destination_row():
     write("""
 INSERT INTO inventory.customers(id,first_name,last_name) VALUES(940,'Parent','One');
-INSERT INTO inventory.addresses(customer_id,address_type,street,city,state,zip_code)
-  VALUES(940,'HOME','A','C','NJ','1');
-INSERT INTO inventory.contact_numbers(customer_id,phone_type,phone_number)
-  VALUES(940,'HOME','111');
 INSERT INTO inventory.products(name,category,current_price) VALUES('v2-product','Tools',10);
 INSERT INTO inventory.orders(id,customer_id,status) VALUES(950,940,'OPEN');
 INSERT INTO inventory.order_items(order_id,product_name,quantity,price_at_purchase)
@@ -141,13 +138,12 @@ INSERT INTO inventory.order_items(order_id,product_name,quantity,price_at_purcha
 """)
     tx = "(SELECT last_source_transaction_id FROM source_cdc.owner_state " \
          "WHERE collection='inventory.customers' AND owner_key=jsonb_build_object('id',940)::text)"
-    eq(f"SELECT count(*) FROM source_cdc.revision_journal WHERE source_transaction_id={tx}", 6)
+    eq(f"SELECT count(*) FROM source_cdc.revision_journal WHERE source_transaction_id={tx}", 4)
     eq(f"SELECT count(DISTINCT collection||'|'||owner_key) FROM source_cdc.revision_journal "
-       f"WHERE source_transaction_id={tx}", 6)
-    eq("SELECT version FROM inventory.addresses WHERE customer_id=940 AND address_type='HOME'", 1)
-    write("UPDATE inventory.addresses SET street='B' WHERE customer_id=940 AND address_type='HOME';")
-    eq("SELECT version FROM inventory.addresses WHERE customer_id=940 AND address_type='HOME'", 2)
-    eq("SELECT version FROM inventory.contact_numbers WHERE customer_id=940 AND phone_type='HOME'", 1)
+       f"WHERE source_transaction_id={tx}", 4)
+    eq("SELECT version FROM inventory.order_items WHERE order_id=950 AND product_name='v2-product'", 1)
+    write("UPDATE inventory.order_items SET quantity=3 WHERE order_id=950 AND product_name='v2-product';")
+    eq("SELECT version FROM inventory.order_items WHERE order_id=950 AND product_name='v2-product'", 2)
 
 
 def test_logical_capture_and_rollback():

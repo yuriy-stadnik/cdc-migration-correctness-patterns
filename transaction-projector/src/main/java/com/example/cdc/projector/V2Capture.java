@@ -12,8 +12,7 @@ import static com.example.cdc.protocol.ProtocolV2.*;
 
 /** Pinned PostgreSQL/Debezium adapter. Source log intervals qualify native XIDs, never Kafka offsets. */
 final class V2Capture {
-    static final Set<String> TABLES = Set.of("inventory.customers", "inventory.addresses",
-            "inventory.contact_numbers", "inventory.products", "inventory.orders", "inventory.order_items",
+    static final Set<String> TABLES = Set.of("inventory.customers", "inventory.products", "inventory.orders", "inventory.order_items",
             "source_cdc.transaction_context", "source_cdc.revision_journal");
     static final int MAX_EVENTS = 100_000;
     private final String database, incarnation;
@@ -214,8 +213,6 @@ final class V2Capture {
     OwnerIdentity ownerFromRow(String collection, JsonNode row) {
         List<String> keys = switch (collection) {
             case "inventory.customers", "inventory.orders" -> List.of("id");
-            case "inventory.addresses" -> List.of("customer_id", "address_type");
-            case "inventory.contact_numbers" -> List.of("customer_id", "phone_type");
             case "inventory.order_items" -> List.of("order_id", "product_name");
             case "inventory.products" -> List.of("name");
             default -> throw new IllegalArgumentException("unsupported row collection");

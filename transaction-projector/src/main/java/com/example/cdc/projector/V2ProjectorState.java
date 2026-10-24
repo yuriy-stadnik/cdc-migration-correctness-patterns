@@ -4,14 +4,11 @@ import com.example.cdc.protocol.ProtocolV2.*;
 import com.fasterxml.jackson.databind.JsonNode;
 import java.util.*;
 
-/** One checkpoint includes capture evidence, baseline, producer claims, graph and immutable planned output (not destination apply receipts). */
+/** One checkpoint includes capture evidence, producer claims, graph and immutable planned output (not destination apply receipts). */
 public final class V2ProjectorState {
     public int formatVersion = 2;
     public String lane;
     public String haltedReason;
-    public Baseline activeBaseline;
-    public Baseline candidateBaseline;
-    public Map<String, BaselineOwner> baselineOwners = new TreeMap<>();
     public Map<String, JsonNode> observations = new TreeMap<>();
     public Map<String, String> observationTransactions = new TreeMap<>();
     public Map<String, Producer> producers = new TreeMap<>();
@@ -21,7 +18,6 @@ public final class V2ProjectorState {
     public Map<String, String> quarantine = new TreeMap<>();
     public Set<String> assembledEnds = new TreeSet<>();
     public Map<String, String> waiting = new TreeMap<>();
-    public Map<String, JsonNode> snapshots = new TreeMap<>();
 
     public static final class Producer {
         public ProducerReference reference;

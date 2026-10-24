@@ -15,7 +15,6 @@ class ProtocolV2CodecTest {
     private static final String DB = "source";
     private static final String INC = "inc-1";
     private static final String SCOPE = "scope";
-    private static final String BASELINE = "baseline";
     private static final OwnerState ABSENT = new OwnerState(Presence.ABSENT, null);
     private static final OwnerState PRESENT = new OwnerState(Presence.PRESENT, 1L);
 
@@ -34,17 +33,17 @@ class ProtocolV2CodecTest {
         OwnerIdentity owner = owner("inventory.customers", Map.of("id", new TypedValue("int64", "42")));
         ObjectIdentity object = new ObjectIdentity("client.customers", owner.primaryKey());
         String tx = ProtocolV2Codec.transactionId(DB, INC, UUID);
-        Predecessor predecessor = new Predecessor(ABSENT, new ProducerReference(ProducerType.BASELINE, BASELINE));
+        Predecessor predecessor = new Predecessor(ABSENT, new ProducerReference(ProducerType.BASELINE, EMPTY_BASELINE_ID));
         OwnerTransition transition = new OwnerTransition(tx, owner, predecessor, PRESENT,
                 List.of(new JournalRevision(1, ABSENT, PRESENT)), null, customer(1));
         Mutation mutation = ProtocolV2Codec.signMutation(new Mutation(VERSION, SCHEMA_VERSION, RecordType.MUTATION,
-                tx, DB, INC, SCOPE, GENERATION, BASELINE, 1, "pending", "pending",
+                tx, DB, INC, SCOPE, GENERATION, EMPTY_BASELINE_ID, 1, "pending", "pending",
                 owner, object, Operation.INSERT, predecessor, PRESENT, List.of(), null, customer(1)));
         SourceBoundary boundary = new SourceBoundary(UUID, "7", "0/1", "0/2", 1, 3,
                 Map.of("inventory.customers", 1, "source_cdc.transaction_context", 1,
                         "source_cdc.revision_journal", 1));
         Manifest manifest = ProtocolV2Codec.signManifest(new Manifest(VERSION, SCHEMA_VERSION,
-                RecordType.MANIFEST, tx, DB, INC, SCOPE, GENERATION, BASELINE, boundary,
+                RecordType.MANIFEST, tx, DB, INC, SCOPE, GENERATION, EMPTY_BASELINE_ID, boundary,
                 1, 1, List.of(transition), "pending"), List.of(mutation));
         return new Fixture(transition, mutation, manifest);
     }
@@ -62,10 +61,10 @@ class ProtocolV2CodecTest {
         Fixture fixture = fixture();
         Mutation base = fixture.mutation;
         OwnerState deleted = new OwnerState(Presence.DELETED, 2L);
-        Dependency dependency = new Dependency(DependencyType.AFTER_TRANSACTION, base.owner(), PRESENT,
+        Dependency dependency = new Dependency(DependencyType.EXISTS, base.owner(), PRESENT,
                 new ProducerReference(ProducerType.TRANSACTION, "prior"), "ordered dependency");
         Mutation altered = ProtocolV2Codec.signMutation(new Mutation(VERSION, SCHEMA_VERSION, RecordType.MUTATION,
-                base.transactionId(), DB, INC, SCOPE, GENERATION, BASELINE, 1, "pending", "pending",
+                base.transactionId(), DB, INC, SCOPE, GENERATION, EMPTY_BASELINE_ID, 1, "pending", "pending",
                 base.owner(), base.object(), Operation.INSERT, base.expected(), base.result(),
                 List.of(dependency), base.before(), base.after()));
         assertNotEquals(ProtocolV2Codec.mutationSetHash(List.of(base)),
@@ -75,30 +74,18 @@ class ProtocolV2CodecTest {
         assertEquals(Presence.DELETED, deleted.presence());
     }
 
-    @Test void sourceAndDestinationKeysMustMatchOneToOne() {
-        OwnerIdentity address = owner("inventory.addresses", Map.of(
+    @Test void removedTablesAreRejected() {
+        assertThrows(IllegalArgumentException.class, () -> owner("inventory.addresses", Map.of(
                 "customer_id", new TypedValue("int64", "42"),
-                "address_type", new TypedValue("text", "HOME")));
-        assertThrows(IllegalArgumentException.class, () -> new Mutation(VERSION, SCHEMA_VERSION,
-                RecordType.MUTATION, "tx", DB, INC, SCOPE, GENERATION, BASELINE, 1, "id", "key",
-                address, new ObjectIdentity("operational.contact_numbers", Map.of(
-                        "customer_id", new TypedValue("int64", "42"),
-                        "phone_type", new TypedValue("text", "HOME"))), Operation.INSERT,
-                new Predecessor(ABSENT, new ProducerReference(ProducerType.BASELINE, BASELINE)), PRESENT,
-                List.of(), null, customer(1)));
+                "address_type", new TypedValue("text", "HOME"))));
     }
 
-    @Test void baselineUsesCanonicalRowsWithoutPerRecordHashes() {
-        OwnerIdentity customer = owner("inventory.customers", Map.of("id", new TypedValue("int64", "42")));
-        BaselineOwner record = new BaselineOwner(VERSION, SCHEMA_VERSION, RecordType.BASELINE_OWNER,
-                BASELINE, DB, INC, SCOPE, GENERATION, customer, PRESENT, customer(1), "0/1");
-        Baseline baseline = new Baseline(VERSION, SCHEMA_VERSION, RecordType.BASELINE, BASELINE,
-                BaselineStatus.ACTIVE, DB, INC, SCOPE, GENERATION,
-                new SnapshotBoundary("POSTGRES_LSN", "0/1", true, 1, 0), 1);
-        ProtocolV2Codec.verifyBaseline(baseline, List.of(record));
-        assertEquals(ProtocolV2Codec.json(record), ProtocolV2Codec.json(
-                ProtocolV2Codec.readBaselineOwner(BASELINE_TOPIC, ProtocolV2Codec.json(record))));
-        assertEquals(ProtocolV2Codec.json(baseline), ProtocolV2Codec.json(
-                ProtocolV2Codec.readBaseline(CONTROL_TOPIC, ProtocolV2Codec.json(baseline))));
+    @Test void onlyTheFixedEmptyBootstrapCanProveAbsence() {
+        assertDoesNotThrow(() -> new Predecessor(ABSENT,
+                new ProducerReference(ProducerType.BASELINE, EMPTY_BASELINE_ID)));
+        assertThrows(IllegalArgumentException.class, () -> new Predecessor(ABSENT,
+                new ProducerReference(ProducerType.BASELINE, "dynamic-baseline")));
+        assertThrows(IllegalArgumentException.class, () -> new Predecessor(PRESENT,
+                new ProducerReference(ProducerType.BASELINE, EMPTY_BASELINE_ID)));
     }
 }

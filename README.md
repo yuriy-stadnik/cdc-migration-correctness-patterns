@@ -8,7 +8,8 @@ This is a prototype built with an example inventory/customer/order dataset. Its 
 
 - [`SYSTEM_COMPONENTS_DESCRIPTION.md`](SYSTEM_COMPONENTS_DESCRIPTION.md): concise component and execution-flow overview.
 - [`docs/java-transaction-protocol-and-projector.md`](docs/java-transaction-protocol-and-projector.md): Java protocol records, projector classes, dependencies, and execution sequence.
-- [`docs/transaction-protocol-operations.md`](docs/transaction-protocol-operations.md): protocol, baseline, dependency, recovery, and verification runbook.
+- [`docs/transaction-working-example.md`](docs/transaction-working-example.md): executable four-row source transaction traced through the local pipeline.
+- [`docs/transaction-protocol-operations.md`](docs/transaction-protocol-operations.md): local protocol, dependency, recovery, and verification runbook.
 - [`docs/CURRENT_STATUS.md`](docs/CURRENT_STATUS.md): current implementation and verification status.
 - [`local/README.md`](local/README.md): local startup, test, and shutdown commands.
 - [`scripts/ops/README.md`](scripts/ops/README.md): AWS inspection helpers.
@@ -16,7 +17,7 @@ This is a prototype built with an example inventory/customer/order dataset. Its 
 The AWS environment uses the public EC2 instance as an on-premises infrastructure emulator. The main flow is:
 
 1. The EC2 instance runs PostgreSQL, Debezium, Kafka, Flink, Kafka UI, and MirrorMaker2 in Docker.
-2. The example source uses six normalized tables. Each source row owns exactly one destination row with the same primary key.
+2. The simplified local example uses four normalized tables. Each source row owns exactly one destination row with the same primary key.
 3. Debezium routes row changes, source revision-journal rows, and transaction metadata into ordered `cdc.source.capture.v2`.
 4. Flink assembles complete source transactions and emits immutable `cdc.tx.control.v2` and `cdc.tx.mutations.v2` records.
 5. MirrorMaker2 replicates the `cdc.tx.*.v2` protocol topics to MSK Serverless using IAM authentication.
@@ -44,7 +45,6 @@ The EC2 host is the source-side infrastructure emulator. AWS keeps MSK Serverles
 The transaction protocol uses:
 
 - `cdc.source.capture.v2` as the ordered source-planning lane.
-- `cdc.source.baseline.control.v2` and `cdc.tx.baseline.v2` for reconciliation activation.
 - `cdc.tx.control.v2` for immutable manifests and lifecycle control.
 - `cdc.tx.mutations.v2` for immutable numbered mutation payloads.
 - `cdc.tx.dlq.v2` for quarantined source protocol failures.
@@ -123,7 +123,7 @@ terraform apply \
 Run a delivery test:
 
 ```bash
-./local/scripts/run-local-e2e.sh
+RESET=1 ./local/scripts/run-local-e2e.sh
 ```
 
 Start or stop the split local deployment without running the E2E assertions:
@@ -458,7 +458,7 @@ The Lambda handler:
 - Reads credentials from the RDS-managed Secrets Manager secret.
 - Connects to one Aurora PostgreSQL database containing the `client`, `operational`, and `cdc` schemas.
 - Durably stages fragments and applies only complete, verified source transactions.
-- Commits business rows, numeric owner versions, the immutable receipt, and the outbox record atomically.
+- Commits business rows, numeric owner versions, and the immutable receipt atomically.
 
 The Lambda environment variables are set by Terraform:
 
@@ -476,7 +476,7 @@ After MSK is enabled and the EC2 host is configured with the current MSK bootstr
 ./scripts/run-aws-e2e-test.sh us-east-1 ~/.ssh/temp_ec2_key
 ```
 
-The script inserts seven normalized rows in one source transaction, verifies the projected mutation topic locally and in MSK, then waits for Lambda to commit all rows and one seven-mutation receipt in Aurora.
+The existing AWS E2E script still targets the earlier six-table/seven-mutation deployment contract. It was intentionally not changed or run during the local simplification and must be reconciled before AWS validation.
 
 Optional environment overrides:
 

@@ -70,15 +70,6 @@ public final class ProtocolV2Codec {
         if (!CONTROL_TOPIC.equals(topic)) throw new IllegalArgumentException("wrong control topic");
         Manifest manifest = parse(json, Manifest.class); verifyManifestEnvelope(manifest); return manifest;
     }
-    public static Baseline readBaseline(String topic, String json) {
-        if (!CONTROL_TOPIC.equals(topic)) throw new IllegalArgumentException("wrong baseline topic");
-        Baseline baseline = parse(json, Baseline.class); verifyBaseline(baseline); return baseline;
-    }
-    public static BaselineOwner readBaselineOwner(String topic, String json) {
-        if (!BASELINE_TOPIC.equals(topic)) throw new IllegalArgumentException("wrong baseline owner topic");
-        BaselineOwner owner = parse(json, BaselineOwner.class); verifyBaselineOwner(owner); return owner;
-    }
-
     public static String transactionId(String databaseId, String incarnation, String sourceUuid) {
         ProtocolV2.require(databaseId, "database id"); ProtocolV2.require(incarnation, "source incarnation");
         try {
@@ -216,51 +207,5 @@ public final class ProtocolV2Codec {
             throw new IllegalArgumentException("mutation sequence gap");
         if (!transitions.keySet().equals(emitted))
             throw new IllegalArgumentException("each source row must emit exactly one destination descriptor");
-    }
-
-    public static BaselineOwner signBaselineOwner(BaselineOwner owner) { verifyBaselineOwner(owner); return owner; }
-    public static void verifyBaselineOwner(BaselineOwner owner) {
-        JsonNode version = owner.payload() == null ? null : owner.payload().get("version");
-        if (version != null && (!version.isIntegralNumber() || !version.canConvertToLong()
-                || version.longValue() != owner.state().version()))
-            throw new IllegalArgumentException("baseline payload version mismatch");
-        if (owner.payload() != null && !owner.payload().isNull()) {
-            ObjectIdentity object = new ObjectIdentity(switch (owner.owner().collection()) {
-                case "inventory.customers" -> "client.customers";
-                case "inventory.addresses" -> "client.addresses";
-                case "inventory.contact_numbers" -> "operational.contact_numbers";
-                case "inventory.orders" -> "operational.orders";
-                case "inventory.order_items" -> "operational.order_items";
-                case "inventory.products" -> "operational.products";
-                default -> throw new IllegalArgumentException("unsupported owner");
-            }, owner.owner().primaryKey());
-            verifyPayload(owner.payload(), object, owner.state());
-        }
-    }
-    public static Baseline signBaseline(Baseline baseline, List<BaselineOwner> owners) {
-        verifyBaseline(baseline, owners); return baseline;
-    }
-    public static void verifyBaseline(Baseline baseline) {
-        if (baseline.status() == BaselineStatus.ACTIVE && !baseline.boundary().complete())
-            throw new IllegalArgumentException("active baseline incomplete");
-    }
-    public static void verifyBaseline(Baseline baseline, List<BaselineOwner> owners) {
-        verifyBaseline(baseline);
-        if (baseline.ownerRecordCount() != owners.size()) throw new IllegalArgumentException("baseline owner count mismatch");
-        Set<String> keys = new HashSet<>(); long present = 0, deleted = 0;
-        for (BaselineOwner owner : owners) {
-            verifyBaselineOwner(owner);
-            if (!owner.baselineId().equals(baseline.baselineId())
-                    || !owner.sourceDatabaseId().equals(baseline.sourceDatabaseId())
-                    || !owner.sourceIncarnation().equals(baseline.sourceIncarnation())
-                    || !owner.captureScopeId().equals(baseline.captureScopeId())
-                    || !owner.projectionGeneration().equals(baseline.projectionGeneration())
-                    || !owner.snapshotPosition().equals(baseline.boundary().position())
-                    || !keys.add(json(owner.owner())))
-                throw new IllegalArgumentException("mixed or duplicate baseline owner");
-            if (owner.state().presence() == Presence.PRESENT) present++; else deleted++;
-        }
-        if (present != baseline.boundary().rowCount() || deleted != baseline.boundary().tombstoneCount())
-            throw new IllegalArgumentException("baseline owner presence counts mismatch");
     }
 }

@@ -32,8 +32,7 @@ public final class TransactionProjectorJob {
 
         KafkaSource<CaptureRecord> source = KafkaSource.<CaptureRecord>builder()
                 .setBootstrapServers(bootstrap)
-                .setTopics(java.util.List.of(captureTopic, V2Projector.BASELINE_CONTROL_INPUT,
-                        com.example.cdc.protocol.ProtocolV2.BASELINE_TOPIC))
+                .setTopics(java.util.List.of(captureTopic))
                 .setGroupId("transaction-projector-v2-" + incarnation)
                 .setStartingOffsets(OffsetsInitializer.earliest())
                 .setProperty("isolation.level", "read_committed")

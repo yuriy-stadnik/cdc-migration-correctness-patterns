@@ -1,43 +1,38 @@
 # Current status
 
-As of **2026-10-12**, the active implementation is the normalized, source-owned row-version protocol.
+As of **2026-10-23**, the simplified local transaction-boundary lab is green.
 
 ## Verdict
 
-**Focused verification and the clean local full-stack path are green. AWS deployment verification is not yet recorded.**
+The local path preserves a source PostgreSQL transaction while splitting its rows between `client` and `operational` schemas in one destination database transaction. AWS deployment readiness is intentionally not claimed.
 
-No AWS deployment, Terraform apply/destroy, shared database reset, commit, or push was performed as part of this change.
+## Active local model
 
-## Active model
+- Four source tables map one-to-one by primary key: customers, products, orders, and order items.
+- The destination split is `client.customers` plus three `operational.*` tables.
+- Source-owned numeric versions, `source_cdc.owner_state`, and append-only `source_cdc.revision_journal` remain.
+- `ProducerType`, exact transaction producer lineage, the dependency graph, and cycle detection remain.
+- Separate `cdc.tx.control.v2`, `cdc.tx.mutations.v2`, and `cdc.tx.dlq.v2` topics remain.
+- Clean local volumes use the fixed `BASELINE/empty-bootstrap-v1` proof only for first-creation `ABSENT` state.
+- The destination atomically commits business rows, owner state, producer evidence, and one immutable receipt.
 
-- Six source tables map one-to-one to six destination tables by primary key: customers, addresses, contact numbers, products, orders, and order items.
-- Every source business row has a database-managed numeric version and a retained owner-state/journal lineage.
-- A source transaction has one stable UUID and an ordered append-only revision journal.
-- The projector emits one direct mutation for each changed source owner and derives only foreign-key existence dependencies.
-- The destination checks numeric versions on business rows and commits the full mutation set, receipt, owner state, and outbox atomically.
-- The only protocol integrity digest retained is `mutationSetHash`, computed over the complete canonical mutation descriptors.
-- The active runtime has no compatibility selector or alternate protocol path.
-
-The source has no projection tables, multi-writer contribution arbitration, dirty-owner queue, deferred projection finalizer, catalog-delete API, parent fence owners, or process-wide writer lock.
+Removed local complexity includes dynamic baseline reconciliation/topics/tables, addresses/contact numbers, global advisory and logical owner locks, destination outbox, and persistent quarantine storage. A single local apply worker is assumed.
 
 ## Fresh evidence
 
 | Check | Result |
 |---|---:|
 | `transaction-protocol` Gradle tests | passed |
-| `transaction-projector` Gradle tests | passed |
-| `transaction-apply` Gradle tests, including embedded PostgreSQL | passed |
-| Disposable PostgreSQL source trigger/journal integration suite | 6/6 passed |
-| Real Debezium capture fixture and projector replay test | passed |
-| Clean-volume two-Compose baseline + seven-mutation atomic E2E | passed |
-| Compose configuration validation | passed |
-| Terraform format and validation | passed |
+| `transaction-projector` Gradle tests, including cycle detection | passed |
+| `transaction-apply` Gradle tests with embedded PostgreSQL | passed |
+| Local Kafka apply-consumer Gradle tests | passed |
+| Disposable PostgreSQL source trigger/journal suite | 6/6 passed |
+| Source and cloud Compose configuration validation | passed |
+| Shell syntax checks | passed |
+| Clean-volume full local Debezium/Flink/MM2/apply E2E | passed |
+| First cross-schema receipt | 4 mutations |
+| Second cross-schema update receipt | 2 mutations |
 
-The source integration suite verifies the normalized table inventory, publication contents, absence of retired source schemas/tables, write admission, rollback, numeric lifecycle, delete/re-create, primary-key-change rejection, logical decoding, overflow, concurrent independent writers, and restart persistence.
+## AWS boundary
 
-## Remaining release work
-
-- Exercise assembled-container restart/replay fault injection beyond the clean startup path.
-- Run an isolated AWS rehearsal before declaring the deployment release-ready.
-
-Superseded design, validation, command-history, and generated prompt documents were removed. This status, the operations guide, and the executable schema/tests define the active posture.
+No AWS API, deployment, or real AWS test was used. Terraform, `user_data.sh.tpl`, Kafka UI, the private network-test EC2 host, and AWS scripts were not modified. Shared Java/SQL artifacts now implement the local simplification while AWS wiring still describes the earlier baseline/six-table contract. Reconcile those differences and perform an isolated AWS rehearsal before any AWS deployment.

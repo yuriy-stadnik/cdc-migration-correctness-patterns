@@ -22,16 +22,14 @@ final class V2TransactionApplyService {
             JsonNode diagnostic=V2BusinessRows.parse(value);
             if(!diagnostic.path("protocolVersion").isInt()||diagnostic.path("protocolVersion").intValue()!=2
                     ||!diagnostic.path("recordType").asText().equals("CAPTURE_FAILURE"))throw new Conflict("unsupported v2 diagnostic");
-            try(Connection c=connections.open()){quarantine(c,null,null,"source capture failure",value);}return StageResult.QUARANTINED;
+            return StageResult.QUARANTINED;
         }
-        // Baseline activation is an administrator/source reconciliation operation, never a Kafka assertion.
         Mutation mutation=null;Manifest manifest=null;
         try {
             mutation=MUTATION_TOPIC.equals(topic)?readMutation(topic,value):null;
             manifest=CONTROL_TOPIC.equals(topic)?readManifest(topic,value):null;
-            if(mutation==null&&manifest==null)throw new Conflict("unsupported v2 input; baseline requires controlled reconciliation");
+            if(mutation==null&&manifest==null)throw new Conflict("unsupported v2 input");
         } catch(IllegalArgumentException|Conflict malformed) {
-            try(Connection c=connections.open()){quarantine(c,null,null,malformed.getMessage(),value);}
             return StageResult.QUARANTINED;
         }
         Work work=mutation!=null?new Work(lane(mutation),mutation.transactionId()):new Work(lane(manifest),manifest.transactionId());
@@ -42,7 +40,7 @@ final class V2TransactionApplyService {
                 String status=scalar(c,"SELECT state FROM cdc.v2_transaction WHERE lane=? AND transaction_id=? FOR UPDATE",work.lane,work.tx);
                 boolean duplicate=false;
                 try {
-                    if("FAILED".equals(status))throw new Conflict("transaction is quarantined");
+                    if("FAILED".equals(status))throw new Conflict("transaction has failed");
                     if(mutation!=null) {
                         String prior=scalar(c,"SELECT payload::text FROM cdc.v2_mutation WHERE lane=? AND transaction_id=? AND sequence=?",work.lane,work.tx,mutation.mutationSequence());
                         if(prior!=null) {
@@ -81,7 +79,7 @@ final class V2TransactionApplyService {
                     c.commit();return duplicate?StageResult.DUPLICATE:StageResult.STAGED;
                 } catch(IllegalArgumentException|Conflict corrupt) {
                     execute(c,"UPDATE cdc.v2_transaction SET state='FAILED',last_error=? WHERE lane=? AND transaction_id=? AND state<>'APPLIED'",corrupt.getMessage(),work.lane,work.tx);
-                    quarantine(c,work.lane,work.tx,corrupt.getMessage(),value);c.commit();return StageResult.QUARANTINED;
+                    c.commit();return StageResult.QUARANTINED;
                 }
             }catch(Exception e){c.rollback();if(e instanceof SQLException se)throw se;throw e;}
         }
@@ -91,32 +89,21 @@ final class V2TransactionApplyService {
         try(Connection c=connections.open()) {
             c.setAutoCommit(false);
             try {
-                lease(c,false);
-                try(var p=prepare(c,"SELECT lane,transaction_id FROM cdc.v2_transaction WHERE state IN ('READY','WAITING') ORDER BY attempts,transaction_id FOR UPDATE SKIP LOCKED LIMIT 1");var r=p.executeQuery()) {
+                try(var p=prepare(c,"SELECT lane,transaction_id FROM cdc.v2_transaction WHERE state IN ('READY','WAITING') ORDER BY attempts,transaction_id FOR UPDATE LIMIT 1");var r=p.executeQuery()) {
                     if(!r.next()){c.commit();return Optional.empty();}work=new Work(r.getString(1),r.getString(2));
                 }
                 manifest=manifest(c,work);List<Mutation> mutations=mutations(c,work);verify(manifest,mutations);
-                activeBaseline(c,manifest);
                 if(receipt(c,work,manifest)){mark(c,work,"APPLIED",null);c.commit();return Optional.of(new ApplyResult(work.tx,true,"matching immutable receipt"));}
-                List<OwnerIdentity> locks=new ArrayList<>();manifest.sourceTransitions().forEach(t->locks.add(t.owner()));
-                for(Dependency d:dependencies(manifest,mutations))locks.add(d.owner());
-                for(var t:manifest.sourceTransitions()) {
-                    locks.addAll(V2BusinessRows.parents(t.owner(),t.before()));locks.addAll(V2BusinessRows.parents(t.owner(),t.after()));
-                }
-                lockOwners(c,work.lane,locks);
-                // Staging uses the same transaction-row lock; verify persisted content again after all key locks.
-                manifest=manifest(c,work);mutations=mutations(c,work);verify(manifest,mutations);activeBaseline(c,manifest);
                 if(cycle(c,work))throw new Conflict("dependency cycle");
                 for(Dependency d:dependencies(manifest,mutations))verifyProducer(c,manifest,d.owner(),d.requiredState(),d.producer());
                 for(OwnerTransition transition:manifest.sourceTransitions())validateState(c,manifest,transition);
                 for(Mutation mutation:mutations)V2BusinessRows.validate(c,mutation);
                 validateParents(c,manifest,mutations);
-                for(Dependency d:dependencies(manifest,mutations))if(d.type()==DependencyType.EXISTS||d.type()==DependencyType.NOT_EXISTS)validatePresence(c,manifest,d);
-                // Deferred FK constraints see the complete final transaction. Logical locks already cover every parent.
+                for(Dependency d:dependencies(manifest,mutations))if(d.type()==DependencyType.EXISTS)validatePresence(c,manifest,d);
+                // Deferred FK constraints see the complete final transaction.
                 for(Mutation mutation:mutations)V2BusinessRows.apply(c,mutation);
                 for(OwnerTransition transition:manifest.sourceTransitions())advance(c,manifest,transition);
                 execute(c,"INSERT INTO cdc.v2_receipt(lane,transaction_id,mutation_set_hash,mutation_count) VALUES(?,?,?,?)",work.lane,work.tx,manifest.mutationSetHash(),mutations.size());
-                execute(c,"INSERT INTO cdc.v2_outbox(event_id,lane,transaction_id,payload) VALUES(?,?,?,?::jsonb)",work.lane+"|"+work.tx,work.lane,work.tx,json(Map.of("transactionId",work.tx,"mutationSetHash",manifest.mutationSetHash(),"mutationCount",mutations.size())));
                 mark(c,work,"APPLIED",null);c.commit();return Optional.of(new ApplyResult(work.tx,true,"committed atomically"));
             } catch(Missing missing) {
                 // No business/owner writes precede the dependency and presence checks.
@@ -138,7 +125,6 @@ final class V2TransactionApplyService {
                 String sql=failure instanceof SQLException s?s.getSQLState():null;
                 boolean retry=sql!=null&&(sql.startsWith("08")||sql.startsWith("40")||sql.startsWith("55")||sql.equals("57P01"));
                 mark(c,work,retry?"WAITING":"FAILED",failure.getMessage());
-                if(!retry)quarantine(c,work.lane,work.tx,failure.getMessage()==null?failure.toString():failure.getMessage(),null);
                 c.commit();return new ApplyResult(work.tx,false,(retry?"RETRY: ":"CONFLICT: ")+failure.getMessage());
             }catch(Exception e){c.rollback();if(e instanceof SQLException se)throw se;throw e;}
         }
@@ -176,16 +162,6 @@ final class V2TransactionApplyService {
             SELECT EXISTS(SELECT 1 FROM edges WHERE id=?)
             """,work.lane,work.tx,work.lane,work.tx));
     }
-    private static Baseline activeBaseline(Connection c,Manifest m)throws SQLException {
-        String lane=lane(m);
-        String active=scalar(c,"SELECT baseline_id FROM cdc.v2_namespace WHERE lane=?",lane);
-        if(active==null)throw new Missing("no locally reconciled active baseline for source/scope/generation");
-        if(!active.equals(m.baselineId()))throw new Conflict("wrong active baseline");
-        String value=scalar(c,"SELECT payload::text FROM cdc.v2_baseline WHERE lane=? AND baseline_id=?",lane,active);
-        if(value==null)throw new Conflict("active baseline evidence missing");Baseline b=readBaseline(CONTROL_TOPIC,value);
-        if(position(m.boundary().commitPosition()).compareTo(position(b.boundary().position()))<=0)throw new Conflict("source transaction is not after reconciled baseline boundary");
-        return b;
-    }
     static java.math.BigInteger position(String s) {
         if(s.contains("/")){var a=s.split("/",-1);if(a.length!=2)throw new Conflict("invalid source position");return new java.math.BigInteger(a[0],16).shiftLeft(32).add(new java.math.BigInteger(a[1],16));}
         return new java.math.BigInteger(s);
@@ -199,12 +175,9 @@ final class V2TransactionApplyService {
     private static void verifyProducer(Connection c,Manifest m,OwnerIdentity owner,OwnerState required,ProducerReference ref)throws SQLException {
         String lane=lane(m),key=json(owner);
         if(ref.type()==ProducerType.BASELINE) {
-            if(!ref.id().equals(m.baselineId()))throw new Conflict("foreign baseline predecessor");
-            String payload=scalar(c,"SELECT payload::text FROM cdc.v2_baseline_owner WHERE lane=? AND baseline_id=? AND owner_key=?",lane,ref.id(),key);
-            if(required.presence()==Presence.ABSENT) {
-                if(payload!=null)throw new Conflict("absence contradicts reconciled baseline");return;
-            }
-            if(payload==null||!readBaselineOwner(BASELINE_TOPIC,payload).state().equals(required))throw new Conflict("baseline predecessor state mismatch");
+            if(!ref.id().equals(EMPTY_BASELINE_ID)||!ref.id().equals(m.baselineId())||required.presence()!=Presence.ABSENT)
+                throw new Conflict("only the empty bootstrap may prove first creation");
+            return;
         } else {
             String receiptHash=scalar(c,"SELECT mutation_set_hash FROM cdc.v2_receipt WHERE lane=? AND transaction_id=?",lane,ref.id());
             if(receiptHash==null) {
@@ -236,19 +209,15 @@ final class V2TransactionApplyService {
         if(current!=null&&!json(current.payload).equals(json(V2BusinessRows.normalize(t.before()))))throw new Conflict("owner payload disagrees with source before image");
     }
     private static void validatePresence(Connection c,Manifest m,Dependency d)throws SQLException {
-        State current=state(c,lane(m),d.owner());boolean exists=d.type()==DependencyType.EXISTS;
-        if(d.requiredState().presence()==Presence.ABSENT) {
-            if(exists||current!=null)throw new Conflict("absence predicate contradicts lineage");
-        } else {
-            if(current==null||current.state.presence()!=(exists?Presence.PRESENT:Presence.DELETED)
-                    ||d.requiredState().presence()!=current.state.presence()||current.state.version()<d.requiredState().version())throw new Conflict("parent presence predicate mismatch");
+        State current=state(c,lane(m),d.owner());
+        if(d.requiredState().presence()!=Presence.PRESENT||current==null||current.state.presence()!=Presence.PRESENT
+                    ||current.state.version()<d.requiredState().version())throw new Conflict("parent presence predicate mismatch");
             String changed=scalar(c,"SELECT version FROM cdc.v2_producer WHERE lane=? AND owner_key=? AND version>? AND version<=? AND presence<>? LIMIT 1",lane(m),json(d.owner()),d.requiredState().version(),current.state.version(),current.state.presence().name());
             if(changed!=null)throw new Conflict("presence belongs to a different lifecycle");
-        }
         ObjectIdentity target=V2BusinessRows.target(d.owner());
         if(target!=null) {
             JsonNode business=V2BusinessRows.read(c,target,true);
-            if(exists?(business==null||!business.path("version").isIntegralNumber()||business.path("version").longValue()!=current.state.version()):business!=null)throw new Conflict("parent business/metadata presence disagreement");
+            if(business==null||!business.path("version").isIntegralNumber()||business.path("version").longValue()!=current.state.version())throw new Conflict("parent business/metadata presence disagreement");
         }
     }
     private static void validateParents(Connection c,Manifest m,List<Mutation> mutations)throws SQLException {

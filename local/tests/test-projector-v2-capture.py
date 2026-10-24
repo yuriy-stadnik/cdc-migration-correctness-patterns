@@ -66,7 +66,6 @@ def main():
         wait(lambda: sql(pg, 'SELECT 1;'))
         for name in ('01-role-and-grants.sql', '02-inventory.sql', '03-source-version-v2.sql'):
             sql(pg, (ROOT / 'local/postgres/init' / name).read_text())
-        # Keep seed rows so the captured initial snapshot exercises all six mappings.
         wait(lambda: run('docker','exec',kafka,'/opt/kafka/bin/kafka-topics.sh',
                          '--bootstrap-server','kafka:9092','--list',timeout=15))
         connect = container('connect', 'debezium/connect:2.7.3.Final', env=(
@@ -79,25 +78,27 @@ def main():
         config['database.hostname']='pg'
         run('docker','exec','-i',connect,'curl','-fsS','-X','POST','-H','Content-Type: application/json',
             '--data-binary','@-','http://localhost:8083/connectors',input=json.dumps({'name':'fixture','config':config}))
-        def snapshot_ready():
-            # Debezium logs may be on stderr; use topic consumer to prove the last snapshot record instead.
-            values=consume(kafka)
-            rows=[json.loads(line) for line in values.splitlines() if line.startswith('{')]
-            if not any(r.get('source',{}).get('snapshot')=='last' for r in rows):
-                raise RuntimeError('snapshot not finished')
-        wait(snapshot_ready)
+        def connector_ready():
+            status=json.loads(run('docker','exec',connect,'curl','-fsS','http://localhost:8083/connectors/fixture/status',timeout=10))
+            if status.get('connector',{}).get('state')!='RUNNING' or any(t.get('state')!='RUNNING' for t in status.get('tasks',[])):
+                raise RuntimeError('connector not running')
+        wait(connector_ready)
         sql(pg, """SET ROLE source_writer;
+BEGIN; SELECT source_cdc.begin_write();
+INSERT INTO inventory.customers(id,first_name,last_name) VALUES(1,'Initial','Customer');
+INSERT INTO inventory.products(name,category,current_price) VALUES('USB-C Cable','Electronics',25);
+INSERT INTO inventory.orders(id,customer_id,status) VALUES(5002,1,'OPEN');
+INSERT INTO inventory.order_items(order_id,product_name,quantity,price_at_purchase) VALUES(5002,'USB-C Cable',2,25);
+COMMIT;
 BEGIN; SELECT source_cdc.begin_write();
 UPDATE inventory.customers SET first_name='Updated' WHERE id=1;
 UPDATE inventory.customers SET first_name='Twice' WHERE id=1;
-UPDATE inventory.addresses SET street='Changed Street' WHERE customer_id=1 AND address_type='HOME';
 UPDATE inventory.order_items SET quantity=3 WHERE order_id=5002 AND product_name='USB-C Cable';
 COMMIT;
 BEGIN; SELECT source_cdc.begin_write(); UPDATE inventory.customers SET first_name='ROLLBACK' WHERE id=1; ROLLBACK;
 BEGIN; SELECT source_cdc.begin_write(); INSERT INTO inventory.customers(id,first_name,last_name) VALUES(99,'New','Customer'); COMMIT;
 BEGIN; SELECT source_cdc.begin_write(); DELETE FROM inventory.customers WHERE id=99; COMMIT;
 BEGIN; SELECT source_cdc.begin_write(); INSERT INTO inventory.customers(id,first_name,last_name) VALUES(99,'Returned','Customer'); COMMIT;
-BEGIN; SELECT source_cdc.begin_write(); UPDATE inventory.customers SET first_name='Again' WHERE id=99; COMMIT;
 """)
         def captured():
             data=consume(kafka)

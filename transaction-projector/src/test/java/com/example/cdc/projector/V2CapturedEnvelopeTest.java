@@ -3,7 +3,6 @@ package com.example.cdc.projector;
 import com.example.cdc.protocol.ProtocolV2.*;
 import com.example.cdc.protocol.ProtocolV2Codec;
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -19,17 +18,8 @@ class V2CapturedEnvelopeTest {
         assumeTrue(fixture != null, "run local/tests/test-projector-v2-capture.py and set V2_CAPTURE_FIXTURE");
         List<JsonNode> rows = new ArrayList<>();
         for (String line : Files.readAllLines(Path.of(fixture))) rows.add(V2Capture.parse(line));
-        List<BaselineOwner> baseline = new ArrayList<>();
-        for (JsonNode r : rows) if (r.path("op").asText().equals("r")) {
-            String collection = V2Capture.collection(r);
-            if (collection.equals("source_cdc.transaction_context") || collection.equals("source_cdc.revision_journal")) continue;
-            ObjectNode payload = (ObjectNode) r.get("after").deepCopy();
-            baseline.add(V2ProjectorTest.baselineOwner(collection, payload));
-        }
-        assertFalse(baseline.isEmpty());
         V2Projector projector = new V2Projector("db", "inc", "scope");
         V2ProjectorState state = new V2ProjectorState();
-        for (var r : V2ProjectorTest.baseline(baseline.toArray(BaselineOwner[]::new))) projector.accept(state,r);
         List<OutputRecord> output = new ArrayList<>();
         for (JsonNode row : rows) output.addAll(projector.accept(state,V2ProjectorTest.record(CAPTURE_TOPIC,row)));
         assertTrue(state.quarantine.isEmpty(), state.quarantine.toString());
@@ -47,7 +37,6 @@ class V2CapturedEnvelopeTest {
         assertNull(state.haltedReason);
         // Starting with a fresh checkpoint, shuffled delivery must produce the same immutable descriptors.
         V2ProjectorState shuffled = new V2ProjectorState();
-        for (var r : V2ProjectorTest.baseline(baseline.toArray(BaselineOwner[]::new))) projector.accept(shuffled,r);
         Collections.shuffle(rows,new Random(17));
         List<OutputRecord> reordered = new ArrayList<>();
         for (JsonNode row : rows) reordered.addAll(projector.accept(shuffled,V2ProjectorTest.record(CAPTURE_TOPIC,row)));

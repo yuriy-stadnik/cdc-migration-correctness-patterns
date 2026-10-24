@@ -19,8 +19,6 @@ docker exec -i local-source-postgres psql -U postgres -d appdb -v ON_ERROR_STOP=
 SELECT table_name, count
 FROM (
   SELECT 'customers' AS table_name, count(*) FROM inventory.customers
-  UNION ALL SELECT 'addresses', count(*) FROM inventory.addresses
-  UNION ALL SELECT 'contact_numbers', count(*) FROM inventory.contact_numbers
   UNION ALL SELECT 'products', count(*) FROM inventory.products
   UNION ALL SELECT 'orders', count(*) FROM inventory.orders
   UNION ALL SELECT 'order_items', count(*) FROM inventory.order_items
@@ -28,13 +26,13 @@ FROM (
 ORDER BY table_name;
 SQL
 
-require_source_count 6 \
-  "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='inventory' AND c.relname IN ('customers','addresses','contact_numbers','products','orders','order_items') AND c.relreplident='f'"
-require_source_count 5 \
+require_source_count 4 \
+  "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='inventory' AND c.relname IN ('customers','products','orders','order_items') AND c.relreplident='f'"
+require_source_count 3 \
   "SELECT count(*) FROM information_schema.table_constraints WHERE table_schema='inventory' AND constraint_type='FOREIGN KEY'"
 require_source_count 1 \
   "SELECT count(*) FROM source_cdc.schema_version WHERE version=3"
-require_source_count 8 \
+require_source_count 6 \
   "SELECT count(*) FROM pg_publication_tables WHERE pubname='source_cdc_v2'"
 require_source_count 0 \
   "SELECT count(*) FROM pg_namespace WHERE nspname='source_projection'"

@@ -137,11 +137,9 @@ services:
       - |
         for spec in \
           'cdc.source.capture.v2:1:delete:604800000' \
-          'cdc.source.baseline.control.v2:1:compact:2592000000' \
-          'cdc.tx.control.v2:12:delete:2592000000' \
-          'cdc.tx.mutations.v2:12:delete:2592000000' \
-          'cdc.tx.baseline.v2:1:compact:2592000000' \
-          'cdc.tx.dlq.v2:3:delete:7776000000'; do
+          'cdc.tx.control.v2:1:delete:2592000000' \
+          'cdc.tx.mutations.v2:1:delete:2592000000' \
+          'cdc.tx.dlq.v2:1:delete:7776000000'; do
           IFS=: read -r topic partitions policy retention <<<"$$spec"
           kafka-topics --bootstrap-server source-kafka:29092 --create --if-not-exists \
             --topic "$$topic" --partitions "$$partitions" --replication-factor 1 \

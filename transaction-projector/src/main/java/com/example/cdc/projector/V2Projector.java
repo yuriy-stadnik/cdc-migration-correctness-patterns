@@ -9,7 +9,6 @@ import static com.example.cdc.projector.V2Capture.*;
 
 /** Deterministic planning over verified source revisions. No clock, Kafka offset, or generated row version. */
 public final class V2Projector {
-    public static final String BASELINE_CONTROL_INPUT = "cdc.source.baseline.control.v2";
     private final String database, incarnation, scope;
     private final V2Capture capture;
     public V2Projector(String database, String incarnation, String scope) {
@@ -24,44 +23,18 @@ public final class V2Projector {
             if (state.formatVersion != 2 || state.lane != null && !state.lane.equals(lane))
                 throw new IllegalArgumentException("incompatible projector checkpoint lane");
             state.lane = lane;
-            if (record.topic().equals(BASELINE_TOPIC)) {
-                BaselineOwner owner = ProtocolV2Codec.readBaselineOwner(BASELINE_TOPIC, record.value());
-                checkScope(owner.sourceDatabaseId(), owner.sourceIncarnation(), owner.captureScopeId(), owner.projectionGeneration());
-                String key = ProtocolV2Codec.json(owner.owner());
-                BaselineOwner prior = state.baselineOwners.get(key);
-                if (prior != null && !ProtocolV2Codec.json(prior).equals(ProtocolV2Codec.json(owner)))
-                    throw new IllegalArgumentException("conflicting baseline owner");
-                if (state.activeBaseline != null && prior == null) throw new IllegalArgumentException("active baseline is immutable");
-                state.baselineOwners.put(key, owner);
-            } else if (record.topic().equals(BASELINE_CONTROL_INPUT)) {
-                Baseline baseline = ProtocolV2Codec.readBaseline(CONTROL_TOPIC, record.value());
-                if (state.candidateBaseline != null && !ProtocolV2Codec.json(state.candidateBaseline).equals(ProtocolV2Codec.json(baseline)))
-                    throw new IllegalArgumentException("conflicting baseline activation marker");
-                state.candidateBaseline = baseline;
-            } else {
-                if (!record.topic().equals(CAPTURE_TOPIC) || record.partition() != 0)
-                    throw new IllegalArgumentException("v2 requires the registered single capture partition");
-                JsonNode root = immutable(parse(record.value()));
-                if (boundary(root) && !Set.of("BEGIN", "END").contains(text(root, "status")))
-                    throw new IllegalArgumentException("unsupported transaction boundary");
-                if (root.path("op").asText().equals("r")) {
-                    // Snapshot rows are evidence only. Activation comes from a complete reconciled baseline bundle.
-                    if (!TABLES.contains(collection(root))) throw new IllegalArgumentException("unknown snapshot collection");
-                    state.snapshots.put(failureKey, root);
-                    return output;
-                }
-                String key = observationKey(root); failureKey = key;
-                JsonNode old = state.observations.get(key);
-                if (old != null && !ProtocolV2Codec.json(old).equals(ProtocolV2Codec.json(root)))
-                    throw new IllegalArgumentException("conflicting duplicate capture occurrence");
-                if (old == null) state.observations.put(key, root);
-                assemble(state, output);
-            }
-            if (state.candidateBaseline != null && state.activeBaseline == null) {
-                if (state.baselineOwners.size() > state.candidateBaseline.ownerRecordCount())
-                    throw new IllegalArgumentException("excess baseline owners");
-                if (state.baselineOwners.size() == state.candidateBaseline.ownerRecordCount()) activate(state, state.candidateBaseline);
-            }
+            if (!record.topic().equals(CAPTURE_TOPIC) || record.partition() != 0)
+                throw new IllegalArgumentException("v2 requires the registered single capture partition");
+            JsonNode root = immutable(parse(record.value()));
+            if (boundary(root) && !Set.of("BEGIN", "END").contains(text(root, "status")))
+                throw new IllegalArgumentException("unsupported transaction boundary");
+            if (root.path("op").asText().equals("r")) return output;
+            String key = observationKey(root); failureKey = key;
+            JsonNode old = state.observations.get(key);
+            if (old != null && !ProtocolV2Codec.json(old).equals(ProtocolV2Codec.json(root)))
+                throw new IllegalArgumentException("conflicting duplicate capture occurrence");
+            if (old == null) state.observations.put(key, root);
+            assemble(state, output);
             drain(state, output);
         } catch (RuntimeException failure) {
             quarantine(state, failureKey, failure.getMessage(), output);
@@ -72,35 +45,6 @@ public final class V2Projector {
             }
         }
         return output;
-    }
-
-    private void activate(V2ProjectorState state, Baseline baseline) {
-        checkScope(baseline.sourceDatabaseId(), baseline.sourceIncarnation(), baseline.captureScopeId(), baseline.projectionGeneration());
-        if (baseline.status() != BaselineStatus.ACTIVE || !baseline.boundary().positionKind().equals("POSTGRES_LSN"))
-            throw new IllegalArgumentException("an ACTIVE PostgreSQL baseline is required");
-        ProtocolV2Codec.verifyBaseline(baseline, new ArrayList<>(state.baselineOwners.values()));
-        if (state.activeBaseline != null) {
-            if (!ProtocolV2Codec.json(state.activeBaseline).equals(ProtocolV2Codec.json(baseline)))
-                throw new IllegalArgumentException("baseline replacement requires a new checkpoint generation");
-            return;
-        }
-        Map<String, V2ProjectorState.Producer> baselineClaims = new TreeMap<>();
-        for (BaselineOwner owner : state.baselineOwners.values()) {
-            V2ProjectorState.Producer p = new V2ProjectorState.Producer();
-            p.owner = owner.owner(); p.state = owner.state(); p.finalRevision = true;
-            p.reference = new ProducerReference(ProducerType.BASELINE, baseline.baselineId());
-            p.commitPosition = baseline.boundary().position();
-            p.payload = V2Capture.image(owner.owner(), owner.payload(), owner.state());
-            String key = producerKey(p.owner, p.state.version());
-            if (state.producers.containsKey(key)) throw new IllegalArgumentException("baseline/live overlap requires reconciliation");
-            baselineClaims.put(key, p);
-        }
-        state.producers.putAll(baselineClaims);
-        state.activeBaseline = baseline;
-    }
-    private void checkScope(String db, String inc, String captureScope, String generation) {
-        if (!database.equals(db) || !incarnation.equals(inc) || !scope.equals(captureScope) || !GENERATION.equals(generation))
-            throw new IllegalArgumentException("foreign source/scope/generation");
     }
 
     private void assemble(V2ProjectorState state, List<OutputRecord> output) {
@@ -169,11 +113,9 @@ public final class V2Projector {
     }
     private V2ProjectorState.Producer predecessor(V2ProjectorState state, V2ProjectorState.Pending tx, V2ProjectorState.Net net) {
         if (net.beforeState.presence() == Presence.ABSENT) {
-            if (state.baselineOwners.containsKey(ProtocolV2Codec.json(net.owner)))
-                throw new IllegalArgumentException("first creation contradicts baseline lineage");
             V2ProjectorState.Producer p = new V2ProjectorState.Producer();
             p.owner = net.owner; p.state = net.beforeState; p.finalRevision = true;
-            p.reference = new ProducerReference(ProducerType.BASELINE, state.activeBaseline.baselineId());
+            p.reference = new ProducerReference(ProducerType.BASELINE, EMPTY_BASELINE_ID);
             return p;
         }
         var p = state.producers.get(producerKey(net.owner, net.beforeState.version()));
@@ -187,16 +129,12 @@ public final class V2Projector {
 
     private void drain(V2ProjectorState state, List<OutputRecord> output) {
         if (state.haltedReason != null) return;
-        if (state.activeBaseline == null) { state.waiting.put("baseline", "no activated baseline"); return; }
-        state.waiting.remove("baseline");
         boolean progress;
         do {
             progress = false;
             for (var tx : new ArrayList<>(state.pending.values())) {
                 if (state.quarantine.containsKey(tx.transactionId)) continue;
                 try {
-                    if (lsn(tx.boundary.commitPosition()).compareTo(lsn(state.activeBaseline.boundary().position())) <= 0)
-                        throw new IllegalArgumentException("pre-baseline transaction requires explicit overlap reconciliation");
                     Set<String> edges = new TreeSet<>();
                     boolean missing = false;
                     for (var net : tx.nets) {
@@ -292,12 +230,12 @@ public final class V2Projector {
                     ? transition.expected().state().presence() == Presence.PRESENT ? Operation.UPDATE : Operation.INSERT
                     : Operation.DELETE;
             mutations.add(ProtocolV2Codec.signMutation(new Mutation(VERSION, SCHEMA_VERSION, RecordType.MUTATION,
-                    tx.transactionId, database, incarnation, scope, GENERATION, state.activeBaseline.baselineId(),
+                    tx.transactionId, database, incarnation, scope, GENERATION, EMPTY_BASELINE_ID,
                     ++ordinal, "PENDING", "PENDING", transition.owner(), object, operation, transition.expected(), transition.result(),
                     dependencies, transition.before(), transition.after())));
         }
         Manifest manifest = ProtocolV2Codec.signManifest(new Manifest(VERSION, SCHEMA_VERSION, RecordType.MANIFEST,
-                tx.transactionId, database, incarnation, scope, GENERATION, state.activeBaseline.baselineId(), tx.boundary,
+                tx.transactionId, database, incarnation, scope, GENERATION, EMPTY_BASELINE_ID, tx.boundary,
                 transitions.size(), mutations.size(), transitions, "PENDING"), mutations);
         List<OutputRecord> output = new ArrayList<>();
         for (Mutation mutation : mutations) output.add(new OutputRecord(MUTATION_TOPIC, tx.transactionId, ProtocolV2Codec.json(mutation)));
@@ -318,8 +256,6 @@ public final class V2Projector {
     private ObjectIdentity target(OwnerIdentity owner) {
         String entity = switch (owner.collection()) {
             case "inventory.customers" -> "client.customers";
-            case "inventory.addresses" -> "client.addresses";
-            case "inventory.contact_numbers" -> "operational.contact_numbers";
             case "inventory.orders" -> "operational.orders";
             case "inventory.order_items" -> "operational.order_items";
             case "inventory.products" -> "operational.products";
@@ -330,7 +266,7 @@ public final class V2Projector {
     private List<OwnerIdentity> parents(OwnerIdentity owner, JsonNode payload) {
         List<OwnerIdentity> parents = new ArrayList<>();
         switch (owner.collection()) {
-            case "inventory.addresses", "inventory.contact_numbers", "inventory.orders" -> {
+            case "inventory.orders" -> {
                 if (payload.hasNonNull("customer_id")) {
                     var customer = ProtocolV2Codec.mapper().createObjectNode(); customer.set("id", payload.get("customer_id"));
                     parents.add(capture.owner("inventory.customers", customer));

@@ -14,18 +14,17 @@ public final class ProtocolV2 {
     public static final String CAPTURE_TOPIC = "cdc.source.capture.v2";
     public static final String CONTROL_TOPIC = "cdc.tx.control.v2";
     public static final String MUTATION_TOPIC = "cdc.tx.mutations.v2";
-    public static final String BASELINE_TOPIC = "cdc.tx.baseline.v2";
     public static final String DLQ_TOPIC = "cdc.tx.dlq.v2";
     public static final String GENERATION = "inventory-direct-v2";
+    public static final String EMPTY_BASELINE_ID = "empty-bootstrap-v1";
 
     private ProtocolV2() {}
 
-    public enum RecordType { MUTATION, MANIFEST, BASELINE, BASELINE_OWNER }
+    public enum RecordType { MUTATION, MANIFEST }
     public enum Presence { ABSENT, PRESENT, DELETED }
     public enum ProducerType { TRANSACTION, BASELINE }
     public enum Operation { INSERT, UPDATE, DELETE }
-    public enum DependencyType { WRITE_PREDECESSOR, AFTER_TRANSACTION, EXISTS, NOT_EXISTS }
-    public enum BaselineStatus { PREPARING, RECONCILING, ACTIVE, RETIRED, FAILED }
+    public enum DependencyType { WRITE_PREDECESSOR, EXISTS }
 
     static void require(String value, String label) {
         if (value == null || value.isBlank()) throw new IllegalArgumentException(label + " is required");
@@ -40,10 +39,6 @@ public final class ProtocolV2 {
         return switch (collection) {
             case "inventory.customers", "client.customers", "inventory.orders", "operational.orders" ->
                     Map.of("id", "int64");
-            case "inventory.addresses", "client.addresses" ->
-                    Map.of("customer_id", "int64", "address_type", "text");
-            case "inventory.contact_numbers", "operational.contact_numbers" ->
-                    Map.of("customer_id", "int64", "phone_type", "text");
             case "inventory.order_items", "operational.order_items" ->
                     Map.of("order_id", "int64", "product_name", "text");
             case "inventory.products", "operational.products" -> Map.of("name", "text");
@@ -56,9 +51,6 @@ public final class ProtocolV2 {
         if (!key.keySet().equals(expected.keySet()) || key.entrySet().stream().anyMatch(e ->
                 e.getValue() == null || !expected.get(e.getKey()).equals(e.getValue().type())))
             throw new IllegalArgumentException("incorrect typed key for " + collection);
-        if ((collection.equals("inventory.contact_numbers") || collection.equals("operational.contact_numbers"))
-                && !List.of("HOME", "WORK", "MOBILE").contains(key.get("phone_type").value()))
-            throw new IllegalArgumentException("unsupported phone type");
     }
 
     private static void validateImageVersion(JsonNode image, OwnerState state) {
@@ -88,8 +80,8 @@ public final class ProtocolV2 {
     public record ObjectIdentity(String entity, Map<String, TypedValue> primaryKey) {
         public ObjectIdentity {
             require(entity, "destination entity");
-            if (!List.of("client.customers", "client.addresses", "operational.contact_numbers",
-                    "operational.orders", "operational.order_items", "operational.products").contains(entity))
+            if (!List.of("client.customers", "operational.orders",
+                    "operational.order_items", "operational.products").contains(entity))
                 throw new IllegalArgumentException("unsupported destination entity " + entity);
             primaryKey = Map.copyOf(primaryKey);
             validateKey(entity, primaryKey);
@@ -103,8 +95,8 @@ public final class ProtocolV2 {
             require(sourceDatabaseId, "source database id");
             require(sourceIncarnation, "source incarnation");
             require(collection, "owner collection");
-            if (!List.of("inventory.customers", "inventory.addresses", "inventory.contact_numbers",
-                    "inventory.orders", "inventory.order_items", "inventory.products").contains(collection))
+            if (!List.of("inventory.customers", "inventory.orders",
+                    "inventory.order_items", "inventory.products").contains(collection))
                 throw new IllegalArgumentException("unsupported owner collection " + collection);
             primaryKey = Map.copyOf(primaryKey);
             validateKey(collection, primaryKey);
@@ -134,6 +126,9 @@ public final class ProtocolV2 {
             if (state == null || producer == null) throw new IllegalArgumentException("predecessor state and producer required");
             if (state.presence() == Presence.ABSENT && producer.type() != ProducerType.BASELINE)
                 throw new IllegalArgumentException("absence requires baseline proof");
+            if (producer.type() == ProducerType.BASELINE
+                    && (!EMPTY_BASELINE_ID.equals(producer.id()) || state.presence() != Presence.ABSENT))
+                throw new IllegalArgumentException("the empty bootstrap can only prove absence");
         }
     }
 
@@ -197,6 +192,7 @@ public final class ProtocolV2 {
             require(transactionId, "transaction id"); require(sourceDatabaseId, "source database id");
             require(sourceIncarnation, "source incarnation"); require(captureScopeId, "capture scope id");
             require(projectionGeneration, "projection generation"); require(baselineId, "baseline id");
+            if (!EMPTY_BASELINE_ID.equals(baselineId)) throw new IllegalArgumentException("unsupported baseline");
             require(mutationId, "mutation id"); require(idempotencyKey, "idempotency key");
             if (mutationSequence < 1 || owner == null || object == null || operation == null
                     || expected == null || result == null) throw new IllegalArgumentException("incomplete mutation descriptor");
@@ -205,8 +201,6 @@ public final class ProtocolV2 {
                 throw new IllegalArgumentException("mutation owner source identity mismatch");
             String target = switch (owner.collection()) {
                 case "inventory.customers" -> "client.customers";
-                case "inventory.addresses" -> "client.addresses";
-                case "inventory.contact_numbers" -> "operational.contact_numbers";
                 case "inventory.orders" -> "operational.orders";
                 case "inventory.order_items" -> "operational.order_items";
                 case "inventory.products" -> "operational.products";
@@ -256,6 +250,7 @@ public final class ProtocolV2 {
             require(transactionId, "transaction id"); require(sourceDatabaseId, "source database id");
             require(sourceIncarnation, "source incarnation"); require(captureScopeId, "capture scope id");
             require(projectionGeneration, "projection generation"); require(baselineId, "baseline id");
+            if (!EMPTY_BASELINE_ID.equals(baselineId)) throw new IllegalArgumentException("unsupported baseline");
             require(mutationSetHash, "mutation set hash");
             if (boundary == null || sourceTransitionCount < 0 || destinationDescriptorCount < 0)
                 throw new IllegalArgumentException("invalid manifest counts or boundary");
@@ -263,54 +258,4 @@ public final class ProtocolV2 {
         }
     }
 
-    @JsonIgnoreProperties(ignoreUnknown = false)
-    public record SnapshotBoundary(String positionKind, String position, boolean complete,
-                                   long rowCount, long tombstoneCount) {
-        public SnapshotBoundary {
-            require(positionKind, "snapshot position kind"); require(position, "snapshot position");
-            if (rowCount < 0 || tombstoneCount < 0) throw new IllegalArgumentException("negative baseline count");
-        }
-    }
-
-    @JsonIgnoreProperties(ignoreUnknown = false)
-    public record BaselineOwner(int protocolVersion, int schemaVersion, RecordType recordType,
-                                String baselineId, String sourceDatabaseId, String sourceIncarnation,
-                                String captureScopeId, String projectionGeneration,
-                                OwnerIdentity owner, OwnerState state, JsonNode payload,
-                                String snapshotPosition) {
-        public BaselineOwner {
-            requireVersion(protocolVersion, schemaVersion, recordType, RecordType.BASELINE_OWNER);
-            require(baselineId, "baseline id"); require(sourceDatabaseId, "source database id");
-            require(sourceIncarnation, "source incarnation"); require(captureScopeId, "capture scope id");
-            require(projectionGeneration, "projection generation"); require(snapshotPosition, "snapshot position");
-            if (owner == null || state == null || state.presence() == Presence.ABSENT
-                    || !owner.sourceDatabaseId().equals(sourceDatabaseId) || !owner.sourceIncarnation().equals(sourceIncarnation))
-                throw new IllegalArgumentException("baseline owner identity/state mismatch");
-            if (state.presence() == Presence.DELETED && payload != null && !payload.isNull()
-                    || state.presence() == Presence.PRESENT && (payload == null || payload.isNull()))
-                throw new IllegalArgumentException("baseline owner payload/presence mismatch");
-        }
-    }
-
-    @JsonIgnoreProperties(ignoreUnknown = false)
-    public record Baseline(int protocolVersion, int schemaVersion, RecordType recordType,
-                           String baselineId, BaselineStatus status, String sourceDatabaseId,
-                           String sourceIncarnation, String captureScopeId,
-                           String projectionGeneration, SnapshotBoundary boundary,
-                           long ownerRecordCount) {
-        public Baseline {
-            requireVersion(protocolVersion, schemaVersion, recordType, RecordType.BASELINE);
-            require(baselineId, "baseline id"); require(sourceDatabaseId, "source database id");
-            require(sourceIncarnation, "source incarnation"); require(captureScopeId, "capture scope id");
-            require(projectionGeneration, "projection generation");
-            if (status == null || boundary == null) throw new IllegalArgumentException("baseline status/boundary required");
-            long total;
-            try { total = Math.addExact(boundary.rowCount(), boundary.tombstoneCount()); }
-            catch (ArithmeticException e) { throw new IllegalArgumentException("baseline owner count overflow", e); }
-            if (ownerRecordCount < 0 || ownerRecordCount != total)
-                throw new IllegalArgumentException("baseline owner count mismatch");
-            if (status == BaselineStatus.ACTIVE && !boundary.complete())
-                throw new IllegalArgumentException("active baseline requires a complete boundary");
-        }
-    }
 }

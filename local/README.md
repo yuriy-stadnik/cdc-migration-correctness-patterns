@@ -12,7 +12,7 @@ normalized PostgreSQL source
   -> PostgreSQL destination (client + operational + cdc schemas)
 ```
 
-The source tables are `inventory.customers`, `addresses`, `contact_numbers`, `products`, `orders`, and `order_items`. Each source row maps directly to one destination row using the same primary key. The source has no projection tables, contribution/conflict arbitration, catalog-deletion API, or global writer lock.
+The source tables are `inventory.customers`, `products`, `orders`, and `order_items`. They split into `client.customers` and the three `operational.*` tables while one destination transaction preserves the source commit boundary. The source has no projection tables, contribution/conflict arbitration, catalog-deletion API, snapshot reconciliation, or global writer lock.
 
 ## Start and verify
 
@@ -21,10 +21,10 @@ From the repository root:
 ```bash
 ./local/scripts/start-local.sh
 ./local/tests/run-all-components.sh
-./local/scripts/run-local-e2e.sh
+RESET=1 ./local/scripts/run-local-e2e.sh
 ```
 
-The end-to-end script writes all six normalized source tables in one transaction and waits for one atomic destination receipt containing seven row mutations.
+The end-to-end script starts from clean volumes, writes all four normalized source tables in one transaction, and waits for one atomic destination receipt containing four row mutations. It then updates the customer and order together and verifies their shared two-mutation receipt and transaction producer lineage.
 
 To rebuild with clean volumes:
 
@@ -42,10 +42,8 @@ DELETE_VOLUMES=1 ./local/scripts/stop-local.sh
 ## Topics
 
 - `cdc.source.capture.v2`
-- `cdc.source.baseline.control.v2`
 - `cdc.tx.control.v2`
 - `cdc.tx.mutations.v2`
-- `cdc.tx.baseline.v2`
 - `cdc.tx.dlq.v2`
 
 The Debezium connector is named `source-version-v2`; its configuration is in `source/connectors/source-version-v2-config.json`.

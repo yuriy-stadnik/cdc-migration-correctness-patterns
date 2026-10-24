@@ -190,7 +190,7 @@ END $$;
 DO $$
 DECLARE v_table TEXT;
 BEGIN
-  FOREACH v_table IN ARRAY ARRAY['customers','addresses','contact_numbers','products','orders','order_items'] LOOP
+  FOREACH v_table IN ARRAY ARRAY['customers','products','orders','order_items'] LOOP
     EXECUTE format('ALTER TABLE inventory.%I OWNER TO postgres',v_table);
     EXECUTE format('ALTER TABLE inventory.%I ADD COLUMN IF NOT EXISTS version BIGINT',v_table);
     EXECUTE format('UPDATE inventory.%I SET version=1 WHERE version IS NULL',v_table);
@@ -204,10 +204,6 @@ END $$;
 INSERT INTO source_cdc.owner_state(collection,owner_key,version,presence)
 SELECT 'inventory.customers',source_cdc.row_key(to_jsonb(t),ARRAY['id']),version,'PRESENT' FROM inventory.customers t ON CONFLICT DO NOTHING;
 INSERT INTO source_cdc.owner_state(collection,owner_key,version,presence)
-SELECT 'inventory.addresses',source_cdc.row_key(to_jsonb(t),ARRAY['customer_id','address_type']),version,'PRESENT' FROM inventory.addresses t ON CONFLICT DO NOTHING;
-INSERT INTO source_cdc.owner_state(collection,owner_key,version,presence)
-SELECT 'inventory.contact_numbers',source_cdc.row_key(to_jsonb(t),ARRAY['customer_id','phone_type']),version,'PRESENT' FROM inventory.contact_numbers t ON CONFLICT DO NOTHING;
-INSERT INTO source_cdc.owner_state(collection,owner_key,version,presence)
 SELECT 'inventory.products',source_cdc.row_key(to_jsonb(t),ARRAY['name']),version,'PRESENT' FROM inventory.products t ON CONFLICT DO NOTHING;
 INSERT INTO source_cdc.owner_state(collection,owner_key,version,presence)
 SELECT 'inventory.orders',source_cdc.row_key(to_jsonb(t),ARRAY['id']),version,'PRESENT' FROM inventory.orders t ON CONFLICT DO NOTHING;
@@ -218,8 +214,7 @@ DO $$
 DECLARE v_table TEXT; v_keys TEXT;
 BEGIN
   FOR v_table,v_keys IN VALUES
-    ('customers','''id'''),('addresses','''customer_id'',''address_type'''),
-    ('contact_numbers','''customer_id'',''phone_type'''),('products','''name'''),
+    ('customers','''id'''),('products','''name'''),
     ('orders','''id'''),('order_items','''order_id'',''product_name''')
   LOOP
     EXECUTE format('DROP TRIGGER IF EXISTS source_guard ON inventory.%I',v_table);
@@ -234,13 +229,11 @@ END $$;
 DO $$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_publication WHERE pubname='source_cdc_v2') THEN
     ALTER PUBLICATION source_cdc_v2 SET TABLE
-      inventory.customers,inventory.addresses,inventory.contact_numbers,
-      inventory.products,inventory.orders,inventory.order_items,
+      inventory.customers,inventory.products,inventory.orders,inventory.order_items,
       source_cdc.transaction_context,source_cdc.revision_journal;
   ELSE
     CREATE PUBLICATION source_cdc_v2 FOR TABLE
-      inventory.customers,inventory.addresses,inventory.contact_numbers,
-      inventory.products,inventory.orders,inventory.order_items,
+      inventory.customers,inventory.products,inventory.orders,inventory.order_items,
       source_cdc.transaction_context,source_cdc.revision_journal;
   END IF;
 END $$;

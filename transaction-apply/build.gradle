@@ -1,6 +1,5 @@
 plugins {
     id 'java-library'
-    id 'application'
 }
 group = 'com.example.cdc'
 version = '1.0.0'
@@ -15,7 +14,6 @@ dependencies {
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 sourceSets.main.resources.srcDir('../db')
-application { mainClass = 'com.example.cdc.apply.SourceVersionReconcileMain' }
 tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8' }
 tasks.test {
     useJUnitPlatform()

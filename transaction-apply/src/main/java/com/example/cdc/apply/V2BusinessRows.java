@@ -15,15 +15,12 @@ import static com.example.cdc.protocol.ProtocolV2Codec.*;
 final class V2BusinessRows {
     static final Map<String,List<String>> COLUMNS=Map.of(
         "client.customers",List.of("id","first_name","last_name","email","status","created_at","updated_at"),
-        "client.addresses",List.of("customer_id","address_type","street","city","state","zip_code"),
-        "operational.contact_numbers",List.of("customer_id","phone_type","phone_number"),
         "operational.products",List.of("name","category","current_price"),
         "operational.orders",List.of("id","customer_id","order_date","status"),
         "operational.order_items",List.of("order_id","product_name","quantity","price_at_purchase"));
     static ObjectIdentity target(OwnerIdentity owner) {
         String table=switch(owner.collection()) {
-            case "inventory.customers"->"client.customers";case "inventory.addresses"->"client.addresses";
-            case "inventory.contact_numbers"->"operational.contact_numbers";case "inventory.products"->"operational.products";
+            case "inventory.customers"->"client.customers";case "inventory.products"->"operational.products";
             case "inventory.orders"->"operational.orders";case "inventory.order_items"->"operational.order_items";default->null;
         };return table==null?null:new ObjectIdentity(table,owner.primaryKey());
     }
@@ -80,7 +77,7 @@ final class V2BusinessRows {
     }
     static List<OwnerIdentity> parents(OwnerIdentity owner,JsonNode image) {
         if(image==null||image.isNull())return List.of();List<OwnerIdentity> result=new ArrayList<>();
-        if(Set.of("inventory.addresses","inventory.contact_numbers","inventory.orders").contains(owner.collection()) && image.hasNonNull("customer_id"))
+        if(owner.collection().equals("inventory.orders") && image.hasNonNull("customer_id"))
             result.add(new OwnerIdentity(owner.sourceDatabaseId(),owner.sourceIncarnation(),"inventory.customers",Map.of("id",new TypedValue("int64",image.get("customer_id").asText()))));
         if(owner.collection().equals("inventory.order_items")) {
             result.add(new OwnerIdentity(owner.sourceDatabaseId(),owner.sourceIncarnation(),"inventory.orders",Map.of("id",new TypedValue("int64",image.get("order_id").asText()))));
