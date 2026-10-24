@@ -49,7 +49,7 @@ wait_for_count() {
   local label="$1" expected="$2" sql="$3" start now out
   start="$(date +%s)"
   while true; do
-    out="$(sudo docker exec -e PGPASSWORD="${DB_PASSWORD}" lab-legacy-postgres-1 \
+    out="$(sudo docker compose -f /opt/lab/docker-compose.yml exec -T -e PGPASSWORD="${DB_PASSWORD}" legacy-postgres \
       psql -h "${DESTINATION_ENDPOINT}" -U appuser -d "${DESTINATION_DB_NAME}" -Atc "${sql}" 2>/dev/null || true)"
     if [[ "${out}" == "${expected}" ]]; then
       echo "${label}: ok (${out})"
@@ -64,39 +64,32 @@ wait_for_count() {
   done
 }
 
-echo "Writing one seven-row normalized source transaction..."
+echo "Writing the shared four-row source transaction..."
 sudo docker compose -f /opt/lab/docker-compose.yml exec -T -e PGPASSWORD=source_app legacy-postgres \
-  psql -v ON_ERROR_STOP=1 -U source_app -d appdb <<SQL
-BEGIN;
-SELECT source_cdc.begin_write();
-INSERT INTO inventory.customers(id,first_name,last_name,email,status,updated_at)
-VALUES (${CID},'Aws','E2E','${EMAIL}','ACTIVE',now());
-INSERT INTO inventory.addresses(customer_id,address_type,street,city,state,zip_code)
-VALUES (${CID},'HOME','789 Pine Rd','Ridgewood','NJ','07450');
-INSERT INTO inventory.contact_numbers(customer_id,phone_type,phone_number)
-VALUES (${CID},'HOME','201-555-7777'),(${CID},'MOBILE','201-555-7778');
-INSERT INTO inventory.products(name,category,current_price)
-VALUES ('${PRODUCT}','Electronics',129.99);
-INSERT INTO inventory.orders(id,customer_id,status)
-VALUES (${OID},${CID},'COMPLETED');
-INSERT INTO inventory.order_items(order_id,product_name,quantity,price_at_purchase)
-VALUES (${OID},'${PRODUCT}',1,129.99);
-COMMIT;
-SQL
+  psql -v ON_ERROR_STOP=1 -v customer_id="${CID}" -v order_id="${OID}" \
+    -v email="${EMAIL}" -v product="${PRODUCT}" -U source_app -d appdb \
+    -f /config/e2e-source-insert.sql
 
 echo "Checking projected transaction topics..."
-sudo docker exec lab-kafka-1 bash -lc \
+sudo docker compose -f /opt/lab/docker-compose.yml exec -T kafka bash -lc \
   "kafka-console-consumer --bootstrap-server kafka:29092 --topic cdc.tx.mutations.v2 --from-beginning --timeout-ms 30000 --max-messages 2000 2>/dev/null | grep -q '${PRODUCT}'"
-sudo docker exec lab-mirrormaker2-1 bash -lc \
+sudo docker compose -f /opt/lab/docker-compose.yml exec -T mirrormaker2 bash -lc \
   "kafka-console-consumer --bootstrap-server '${MSK_BOOTSTRAP}' --consumer.config /tmp/client.properties --topic cdc.tx.mutations.v2 --from-beginning --timeout-ms 30000 --max-messages 2000 2>/dev/null | grep -q '${PRODUCT}'"
 
 wait_for_count "client.customers" 1 "SELECT count(*) FROM client.customers WHERE id=${CID}"
-wait_for_count "client.addresses" 1 "SELECT count(*) FROM client.addresses WHERE customer_id=${CID}"
-wait_for_count "operational.contact_numbers" 2 "SELECT count(*) FROM operational.contact_numbers WHERE customer_id=${CID}"
 wait_for_count "operational.products" 1 "SELECT count(*) FROM operational.products WHERE name='${PRODUCT}'"
 wait_for_count "operational.orders" 1 "SELECT count(*) FROM operational.orders WHERE id=${OID}"
 wait_for_count "operational.order_items" 1 "SELECT count(*) FROM operational.order_items WHERE order_id=${OID}"
-wait_for_count "atomic receipt" 1 "SELECT count(*) FROM cdc.v2_receipt r JOIN client.customers c ON c.source_tx_id=r.transaction_id JOIN operational.orders o ON o.source_tx_id=r.transaction_id WHERE c.id=${CID} AND o.id=${OID} AND r.mutation_count=7"
+wait_for_count "four-row atomic receipt" 1 "SELECT count(*) FROM cdc.v2_receipt r JOIN client.customers c ON c.source_tx_id=r.transaction_id JOIN operational.orders o ON o.source_tx_id=r.transaction_id WHERE c.id=${CID} AND o.id=${OID} AND r.mutation_count=4"
+
+echo "Writing the shared two-row lineage update..."
+sudo docker compose -f /opt/lab/docker-compose.yml exec -T -e PGPASSWORD=source_app legacy-postgres \
+  psql -v ON_ERROR_STOP=1 -v customer_id="${CID}" -v order_id="${OID}" \
+    -U source_app -d appdb -f /config/e2e-source-update.sql
+
+wait_for_count "customer version two" 1 "SELECT count(*) FROM client.customers WHERE id=${CID} AND version=2 AND status='VERIFIED'"
+wait_for_count "order version two" 1 "SELECT count(*) FROM operational.orders WHERE id=${OID} AND version=2 AND status='SHIPPED'"
+wait_for_count "two-row atomic receipt" 1 "SELECT count(*) FROM cdc.v2_receipt r JOIN client.customers c ON c.source_tx_id=r.transaction_id JOIN operational.orders o ON o.source_tx_id=r.transaction_id WHERE c.id=${CID} AND o.id=${OID} AND r.mutation_count=2"
 
 echo "REMOTE_FULL_E2E_OK CID=${CID} OID=${OID} EMAIL=${EMAIL}"
 REMOTE

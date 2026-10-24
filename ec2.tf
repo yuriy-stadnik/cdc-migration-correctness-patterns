@@ -7,8 +7,9 @@ data "aws_ami" "al2" {
   }
 }
 locals {
-  msk_cluster_arn  = try(aws_msk_serverless_cluster.this[0].arn, null)
-  msk_cluster_name = try(aws_msk_serverless_cluster.this[0].cluster_name, null)
+  msk_cluster_arn             = try(aws_msk_serverless_cluster.this[0].arn, null)
+  msk_cluster_name            = try(aws_msk_serverless_cluster.this[0].cluster_name, null)
+  effective_msk_bootstrap_iam = var.enable_msk ? data.aws_msk_bootstrap_brokers.this[0].bootstrap_brokers_sasl_iam : var.ec2_msk_bootstrap_iam
 }
 data "aws_caller_identity" "current" {}
 
@@ -118,16 +119,23 @@ resource "aws_instance" "kafka_mm2" {
   vpc_security_group_ids      = [aws_security_group.ec2.id]
   iam_instance_profile        = aws_iam_instance_profile.ec2.name
   user_data_base64 = base64gzip(templatefile("${path.module}/user_data.sh.tpl", {
-    msk_bootstrap_iam             = var.ec2_msk_bootstrap_iam
+    msk_bootstrap_iam             = local.effective_msk_bootstrap_iam
     mm2_topic_allowlist           = var.mm2_topic_allowlist_regex
     mm2_group_allowlist           = var.mm2_group_allowlist_regex
     region                        = var.aws_region
     projector_bucket              = aws_s3_bucket.cdc_artifacts.id
     projector_key                 = aws_s3_object.transaction_projector.key
+    source_roles_sql              = file("${path.module}/local/postgres/init/01-role-and-grants.sql")
     source_inventory_sql          = file("${path.module}/local/postgres/init/02-inventory.sql")
     source_version_sql            = file("${path.module}/local/postgres/init/03-source-version-v2.sql")
     source_version_connector_json = replace(file("${path.module}/local/source/connectors/source-version-v2-config.json"), "source-postgres", "legacy-postgres")
+    transaction_topics            = file("${path.module}/config/transaction-v2-topics.txt")
+    e2e_source_insert_sql         = file("${path.module}/config/e2e-source-insert.sql")
+    e2e_source_update_sql         = file("${path.module}/config/e2e-source-update.sql")
+    mm2_common_properties         = file("${path.module}/config/mm2-common.properties")
+    ec2_cdc_test_script           = file("${path.module}/scripts/ec2-cdc-to-kafka-test.sh")
   }))
+  user_data_replace_on_change = true
 
   root_block_device {
     volume_size           = var.ec2_root_volume_size

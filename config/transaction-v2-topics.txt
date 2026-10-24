@@ -1,0 +1,4 @@
+cdc.source.capture.v2:1:delete:604800000
+cdc.tx.control.v2:1:delete:2592000000
+cdc.tx.mutations.v2:1:delete:2592000000
+cdc.tx.dlq.v2:1:delete:7776000000

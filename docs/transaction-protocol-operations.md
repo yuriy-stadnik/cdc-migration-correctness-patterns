@@ -72,4 +72,10 @@ ORDER BY dependent_transaction_id,owner_key;
 
 ## AWS boundary
 
-This simplification was implemented and verified only for the local deployment path. Terraform, `user_data.sh.tpl`, Kafka UI, private network-test EC2, and AWS test/deployment scripts were not modified. Because shared Java and SQL artifacts changed while AWS wiring did not, the AWS path must be reconciled and tested separately before deployment; this work does not claim AWS readiness.
+AWS wiring now consumes the same source SQL, connector JSON, topic specification, MM2 defaults, E2E transaction SQL, projector, protocol, and apply modules as local deployment. Lambda reserved concurrency is one so the AWS adapter preserves the simplified single-writer assumption.
+
+Build both deployable JARs with `./scripts/build-deployment-artifacts.sh`. Existing source volumes at schema version 3 and destination databases with the previous migration checksum are intentionally rejected; use clean lab resources for this contract.
+
+MSK activation is two-phase: deploy with `enable_msk=true` and mappings disabled, wait for the EC2 `msk-topics-init` service to create the three shared transaction topics, then set `enable_msk_event_source_mappings=true`. This follows AWS's requirement that the Kafka topic exist before its Lambda event-source mapping.
+
+Only local/offline verification was performed. No AWS API, deployment, or AWS E2E test was run, so an isolated AWS rehearsal is still required before declaring AWS readiness.

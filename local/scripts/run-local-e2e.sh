@@ -59,34 +59,23 @@ wait_for "Debezium connector" curl -fsS http://localhost:8083/connectors/source-
 wait_for "transaction projector" bash -c "curl -fsS http://localhost:8081/jobs/overview | grep -q transaction-preserving-cdc-projector"
 wait_for "destination database" docker exec local-cloud-destination-postgres pg_isready -U appuser -d destinationdb
 
-# The first source commit creates one row in each of the four lab tables.
-docker exec -e PGPASSWORD=source_app -i local-source-postgres psql -v ON_ERROR_STOP=1 -U source_app -d appdb <<SQL
-BEGIN;
-SELECT source_cdc.begin_write();
-INSERT INTO inventory.customers(id,first_name,last_name,email,status,updated_at)
-VALUES (${CUSTOMER_ID},'Local','Customer','local-${CUSTOMER_ID}@example.com','ACTIVE',now());
-INSERT INTO inventory.products(name,category,current_price)
-VALUES ('Local Migration Test Item ${ORDER_ID}','Integration',12.50);
-INSERT INTO inventory.orders(id,customer_id,status)
-VALUES (${ORDER_ID},${CUSTOMER_ID},'COMPLETED');
-INSERT INTO inventory.order_items(order_id,product_name,quantity,price_at_purchase)
-VALUES (${ORDER_ID},'Local Migration Test Item ${ORDER_ID}',4,12.50);
-COMMIT;
-SQL
+EMAIL="local-${CUSTOMER_ID}@example.com"
+PRODUCT="Local Migration Test Item ${ORDER_ID}"
+
+# Both local and AWS E2E paths execute the same source transaction SQL.
+docker exec -e PGPASSWORD=source_app -i local-source-postgres psql -v ON_ERROR_STOP=1 \
+  -v customer_id="$CUSTOMER_ID" -v order_id="$ORDER_ID" -v email="$EMAIL" -v product="$PRODUCT" \
+  -U source_app -d appdb -f /config/e2e-source-insert.sql
 
 wait_for_sql "customer" 1 "SELECT count(*) FROM client.customers WHERE id=${CUSTOMER_ID}"
 wait_for_sql "order" 1 "SELECT count(*) FROM operational.orders WHERE id=${ORDER_ID}"
 wait_for_sql "one atomic four-row receipt" 1 "SELECT count(*) FROM cdc.v2_receipt r JOIN client.customers c ON c.source_tx_id=r.transaction_id JOIN operational.orders o ON o.source_tx_id=r.transaction_id WHERE c.id=${CUSTOMER_ID} AND o.id=${ORDER_ID} AND r.mutation_count=4"
 wait_for_sql "all four transaction producers" 4 "SELECT count(*) FROM cdc.v2_producer v JOIN cdc.v2_receipt r ON r.lane=v.lane AND r.transaction_id=v.producer_id JOIN client.customers c ON c.source_tx_id=r.transaction_id WHERE c.id=${CUSTOMER_ID} AND v.producer_type='TRANSACTION'"
 
-# The second commit demonstrates exact transaction lineage from version 1 to 2.
-docker exec -e PGPASSWORD=source_app -i local-source-postgres psql -v ON_ERROR_STOP=1 -U source_app -d appdb <<SQL
-BEGIN;
-SELECT source_cdc.begin_write();
-UPDATE inventory.customers SET status='VERIFIED',updated_at=now() WHERE id=${CUSTOMER_ID};
-UPDATE inventory.orders SET status='SHIPPED' WHERE id=${ORDER_ID};
-COMMIT;
-SQL
+# The second shared commit demonstrates exact transaction lineage from version 1 to 2.
+docker exec -e PGPASSWORD=source_app -i local-source-postgres psql -v ON_ERROR_STOP=1 \
+  -v customer_id="$CUSTOMER_ID" -v order_id="$ORDER_ID" \
+  -U source_app -d appdb -f /config/e2e-source-update.sql
 
 wait_for_sql "customer version two" 1 "SELECT count(*) FROM client.customers WHERE id=${CUSTOMER_ID} AND version=2 AND status='VERIFIED'"
 wait_for_sql "order version two" 1 "SELECT count(*) FROM operational.orders WHERE id=${ORDER_ID} AND version=2 AND status='SHIPPED'"

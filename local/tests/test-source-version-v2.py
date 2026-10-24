@@ -83,6 +83,7 @@ def test_normalized_schema_and_capture_contract():
     assert config["provide.transaction.metadata"] == "true"
     assert config["tombstones.on.delete"] == "false"
     assert config["transforms.route.replacement"] == "cdc.source.capture.v2"
+    assert config["snapshot.mode"] == "no_data"
     configured = set(config["table.include.list"].split(","))
     published = set(psql("SELECT schemaname||'.'||tablename FROM pg_publication_tables "
                          "WHERE pubname='source_cdc_v2'").splitlines())
@@ -91,6 +92,7 @@ def test_normalized_schema_and_capture_contract():
        "WHERE n.nspname='inventory' AND c.relname IN "
        "('customers','products','orders','order_items') "
        "AND c.relreplident='f'", 4)
+    eq("SELECT count(*) FROM source_cdc.schema_version WHERE version=4", 1)
 
 
 def test_permissions_and_rollback():

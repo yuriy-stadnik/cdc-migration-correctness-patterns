@@ -100,4 +100,4 @@ Expected receipt mutation counts are `4` for the insert transaction and `2` for 
 
 ## AWS note
 
-The source/projector/apply modules are shared with AWS, but this simplification intentionally did not modify Terraform, EC2 user data, Kafka UI, the private network-test EC2 host, or AWS test scripts. The AWS path is therefore not claimed compatible or verified after this local-only change.
+The AWS E2E script executes the same SQL files used by the local script. Terraform derives Lambda's MSK topics from the shared topic specification, and EC2 user data installs the shared source SQL, connector configuration, MM2 defaults, and E2E SQL. The AWS adapter is prepared for this example but remains unverified against real AWS services until an isolated AWS rehearsal is run.

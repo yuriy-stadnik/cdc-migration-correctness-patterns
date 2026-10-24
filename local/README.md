@@ -41,12 +41,16 @@ DELETE_VOLUMES=1 ./local/scripts/stop-local.sh
 
 ## Topics
 
+Both local Compose and AWS EC2 bootstrap read the topic definitions from `config/transaction-v2-topics.txt`. Local and AWS MirrorMaker configurations also share `config/mm2-common.properties`.
+
 - `cdc.source.capture.v2`
 - `cdc.tx.control.v2`
 - `cdc.tx.mutations.v2`
 - `cdc.tx.dlq.v2`
 
 The Debezium connector is named `source-version-v2`; its configuration is in `source/connectors/source-version-v2-config.json`.
+
+The local and AWS E2E scripts execute the same source SQL from `config/e2e-source-insert.sql` and `config/e2e-source-update.sql`.
 
 ## Focused tests
 

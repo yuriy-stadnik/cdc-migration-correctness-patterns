@@ -79,6 +79,7 @@ services:
     volumes:
       - source-postgres-data:/var/lib/postgresql/data
       - ../postgres/init:/docker-entrypoint-initdb.d:ro
+      - ../../config:/config:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d appdb"]
       interval: 5s
@@ -97,6 +98,8 @@ services:
         condition: service_completed_successfully
       source-postgres:
         condition: service_healthy
+      source-schema-check:
+        condition: service_completed_successfully
     ports:
       - "8083:8083"
     environment:
@@ -132,19 +135,36 @@ services:
       source-kafka:
         condition: service_healthy
     restart: "no"
+    volumes:
+      - ../../config/transaction-v2-topics.txt:/config/transaction-v2-topics.txt:ro
     entrypoint: ["/bin/bash", "-ec"]
     command:
       - |
-        for spec in \
-          'cdc.source.capture.v2:1:delete:604800000' \
-          'cdc.tx.control.v2:1:delete:2592000000' \
-          'cdc.tx.mutations.v2:1:delete:2592000000' \
-          'cdc.tx.dlq.v2:1:delete:7776000000'; do
+        while IFS= read -r spec; do
+          [ -n "$$spec" ] || continue
           IFS=: read -r topic partitions policy retention <<<"$$spec"
           kafka-topics --bootstrap-server source-kafka:29092 --create --if-not-exists \
             --topic "$$topic" --partitions "$$partitions" --replication-factor 1 \
             --config cleanup.policy="$$policy" --config retention.ms="$$retention"
-        done
+        done < /config/transaction-v2-topics.txt
+
+  source-schema-check:
+    image: postgres:16-alpine
+    container_name: local-source-schema-check
+    networks: [cdc-migration-local]
+    depends_on:
+      source-postgres:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        installed=$$(PGPASSWORD=postgres psql -h source-postgres -U postgres -d appdb -Atqc \
+          "SELECT count(*) FROM source_cdc.schema_version WHERE version=4")
+        [ "$$installed" = "1" ] || {
+          echo "Incompatible source volume; recreate it with DELETE_VOLUMES=1 before starting v2." >&2
+          exit 1
+        }
 
   source-dbz-init:
     image: curlimages/curl:8.7.1
@@ -258,8 +278,9 @@ services:
         condition: service_completed_successfully
     volumes:
       - ./mm2.properties:/etc/kafka/mm2.properties:ro
+      - ../../config/mm2-common.properties:/etc/kafka/mm2-common.properties:ro
     command: >
-      bash -lc "connect-mirror-maker /etc/kafka/mm2.properties"
+      bash -lc "cat /etc/kafka/mm2-common.properties /etc/kafka/mm2.properties > /tmp/mm2.properties && connect-mirror-maker /tmp/mm2.properties"
     restart: unless-stopped
 
   source-kafka-ui:

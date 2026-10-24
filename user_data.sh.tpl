@@ -93,139 +93,22 @@ chmod 0644 /opt/lab/client.properties
 # /opt/lab/integration-test-cdc-to-kafka.sh
 # Inserts one customer row and verifies Debezium delivers it to Kafka.
 # -------------------------------------------------------------------
-cat > /opt/lab/integration-test-cdc-to-kafka.sh <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-
-LAB_DIR="$${LAB_DIR:-/opt/lab}"
-TOPIC="$${TOPIC:-cdc.source.capture.v2}"
-BOOTSTRAP_SERVER="$${BOOTSTRAP_SERVER:-kafka:29092}"
-TIMEOUT_SECONDS="$${TIMEOUT_SECONDS:-120}"
-CUSTOMER_ID="$${CUSTOMER_ID:-$(( $(date +%s) % 1000000000 ))}"
-FIRST_NAME="$${FIRST_NAME:-CdcTest}"
-LAST_NAME="$${LAST_NAME:-Customer}"
-EMAIL="$${EMAIL:-cdc-test-$${CUSTOMER_ID}@example.com}"
-STATUS="$${STATUS:-ACTIVE}"
-
-cd "$LAB_DIR"
-
-if ! command -v docker >/dev/null 2>&1; then
-  echo "Docker is not installed on this EC2 instance." >&2
-  echo "The EC2 bootstrap did not complete, or this instance was created before the Docker stack was added." >&2
-  echo "Check /var/log/user-data.log, or recreate aws_instance.kafka_mm2 so user_data runs again." >&2
-  exit 1
-fi
-
-if [[ ! -f "$LAB_DIR/docker-compose.yml" ]]; then
-  echo "Docker Compose file not found: $LAB_DIR/docker-compose.yml" >&2
-  echo "The EC2 bootstrap did not create the local CDC stack. Check /var/log/user-data.log." >&2
-  exit 1
-fi
-
-wait_for_command() {
-  local description="$1"
-  local timeout="$2"
-  shift 2
-
-  local start
-  start="$(date +%s)"
-  until "$@" >/tmp/ec2-cdc-test-wait.out 2>/tmp/ec2-cdc-test-wait.err; do
-    if (( $(date +%s) - start >= timeout )); then
-      echo "Timed out waiting for: $description" >&2
-      cat /tmp/ec2-cdc-test-wait.out >&2 || true
-      cat /tmp/ec2-cdc-test-wait.err >&2 || true
-      return 1
-    fi
-    sleep 3
-  done
-}
-
-echo "Checking Docker Compose stack in $LAB_DIR..."
-wait_for_command "Kafka broker" "$TIMEOUT_SECONDS" \
-  docker compose exec -T kafka kafka-topics --bootstrap-server "$BOOTSTRAP_SERVER" --list
-
-wait_for_command "legacy PostgreSQL" "$TIMEOUT_SECONDS" \
-  docker compose exec -T legacy-postgres pg_isready -U postgres -d appdb
-
-wait_for_command "Kafka Connect REST API" "$TIMEOUT_SECONDS" \
-  curl -fsS http://localhost:8083/connectors
-
-echo "Checking Debezium connector status..."
-CONNECTOR_STATUS="$(curl -fsS http://localhost:8083/connectors/source-version-v2/status)"
-echo "$CONNECTOR_STATUS"
-if ! printf '%s' "$CONNECTOR_STATUS" | grep -q '"state":"RUNNING"'; then
-  echo "Debezium connector is not RUNNING." >&2
-  exit 1
-fi
-
-echo "Ensuring Kafka topic exists: $TOPIC"
-wait_for_command "Kafka topic $TOPIC" "$TIMEOUT_SECONDS" \
-  docker compose exec -T kafka kafka-topics --bootstrap-server "$BOOTSTRAP_SERVER" --describe --topic "$TOPIC"
-
-echo "Inserting customer id=$CUSTOMER_ID email=$EMAIL into inventory.customers..."
-docker compose exec -T -e PGPASSWORD=source_app legacy-postgres psql -v ON_ERROR_STOP=1 -U source_app -d appdb <<SQL
-BEGIN;
-SELECT source_cdc.begin_write();
-INSERT INTO inventory.customers (id, first_name, last_name, email, status, updated_at)
-      VALUES ($CUSTOMER_ID, '$FIRST_NAME', '$LAST_NAME', '$EMAIL', '$STATUS', now())
-      ON CONFLICT (id) DO UPDATE
-      SET first_name = EXCLUDED.first_name,
-          last_name = EXCLUDED.last_name,
-          email = EXCLUDED.email,
-          status = EXCLUDED.status,
-          updated_at = now();
-COMMIT;
-SQL
-
-echo "Waiting for CDC event in Kafka topic $TOPIC..."
-CONSUMER_OUTPUT="/tmp/ec2-cdc-to-kafka-$${CUSTOMER_ID}.jsonl"
-rm -f "$CONSUMER_OUTPUT"
-
-deadline=$(( $(date +%s) + TIMEOUT_SECONDS ))
-while (( $(date +%s) < deadline )); do
-  docker compose exec -T kafka kafka-console-consumer \
-    --bootstrap-server "$BOOTSTRAP_SERVER" \
-    --topic "$TOPIC" \
-    --from-beginning \
-    --timeout-ms 10000 \
-    --property print.key=true \
-    --property print.value=true >"$CONSUMER_OUTPUT" 2>/tmp/ec2-cdc-test-consumer.err || true
-
-  if grep -Fq "\"id\":$CUSTOMER_ID" "$CONSUMER_OUTPUT" && grep -Fq "\"email\":\"$EMAIL\"" "$CONSUMER_OUTPUT"; then
-    echo "CDC event found for customer id=$CUSTOMER_ID."
-    grep -F "\"email\":\"$EMAIL\"" "$CONSUMER_OUTPUT" | tail -n 1
-    exit 0
-  fi
-
-  sleep 5
-done
-
-echo "CDC event was not found in topic $TOPIC within $${TIMEOUT_SECONDS}s." >&2
-echo "Last consumer stderr:" >&2
-cat /tmp/ec2-cdc-test-consumer.err >&2 || true
-echo "Last consumer output tail:" >&2
-tail -n 40 "$CONSUMER_OUTPUT" >&2 || true
-exit 1
-EOF
+cat > /opt/lab/integration-test-cdc-to-kafka.sh <<'EC2_CDC_TEST_SCRIPT'
+${ec2_cdc_test_script}
+EC2_CDC_TEST_SCRIPT
 chmod +x /opt/lab/integration-test-cdc-to-kafka.sh
 
 # -------------------------------------------------------------------
 # Source emulator files: normalized PostgreSQL CDC -> Kafka -> Flink
 # -------------------------------------------------------------------
-mkdir -p /opt/lab/postgres/init /opt/lab/connectors /opt/lab/flink-checkpoints
+mkdir -p /opt/lab/postgres/init /opt/lab/connectors /opt/lab/config /opt/lab/flink-checkpoints
 chmod 0777 /opt/lab/flink-checkpoints
 mkdir -p /opt/lab/flink-usrlib
 aws s3 cp "s3://${projector_bucket}/${projector_key}" /opt/lab/flink-usrlib/transaction-projector-all.jar
 
-cat > /opt/lab/postgres/init/01-role-and-grants.sql <<'EOF'
-SELECT 'CREATE ROLE dbz WITH LOGIN PASSWORD ''dbz'' REPLICATION'
-WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'dbz')
-\gexec
-
-GRANT CONNECT, CREATE ON DATABASE appdb TO dbz;
-
-CREATE SCHEMA IF NOT EXISTS inventory AUTHORIZATION dbz;
-EOF
+cat > /opt/lab/postgres/init/01-role-and-grants.sql <<'SOURCE_ROLES_SQL'
+${source_roles_sql}
+SOURCE_ROLES_SQL
 
 cat > /opt/lab/postgres/init/02-inventory.sql <<'SOURCE_INVENTORY_SQL'
 ${source_inventory_sql}
@@ -238,6 +121,22 @@ SOURCE_VERSION_SQL
 cat > /opt/lab/connectors/source-version-v2-config.json <<'SOURCE_V2_CONNECTOR'
 ${source_version_connector_json}
 SOURCE_V2_CONNECTOR
+
+cat > /opt/lab/config/transaction-v2-topics.txt <<'TRANSACTION_TOPICS'
+${transaction_topics}
+TRANSACTION_TOPICS
+
+cat > /opt/lab/config/e2e-source-insert.sql <<'E2E_SOURCE_INSERT_SQL'
+${e2e_source_insert_sql}
+E2E_SOURCE_INSERT_SQL
+
+cat > /opt/lab/config/e2e-source-update.sql <<'E2E_SOURCE_UPDATE_SQL'
+${e2e_source_update_sql}
+E2E_SOURCE_UPDATE_SQL
+
+cat > /opt/lab/config/mm2-common.properties <<'MM2_COMMON_PROPERTIES'
+${mm2_common_properties}
+MM2_COMMON_PROPERTIES
 
 # -------------------------------------------------------------------
 # /opt/lab/mm2.properties (Serverless MSK IAM + MM2 lab-safe)
@@ -252,43 +151,14 @@ source.bootstrap.servers = kafka:29092
 # Target (MSK Serverless IAM bootstrap)
 target.bootstrap.servers = ${msk_bootstrap_iam}
 
-# Enable mirroring
-source->target.enabled = true
-target->source.enabled = false
-
 # Mirror only required business topics and selected groups
 source->target.topics = ${mm2_topic_allowlist}
 source->target.groups = ${mm2_group_allowlist}
-
-target.exactly.once.source.support = enabled
-dedicated.mode.enable.internal.rest = true
-source.consumer.isolation.level = read_committed
-source->target.sync.topic.configs.enabled = false
-source->target.sync.topic.acls.enabled = false
-
-# Serverless-safe replication defaults
-replication.factor = 1
-checkpoints.topic.replication.factor = 1
-heartbeats.topic.replication.factor = 1
-offset-syncs.topic.replication.factor = 1
-
-# Keep internal topics small for a lab
-offset-syncs.topic.partitions = 1
-checkpoints.topic.partitions = 1
-heartbeats.topic.partitions = 1
 
 # Kafka Connect internal topics (on target)
 offset.storage.topic = mm2-offsets.target.internal
 config.storage.topic = mm2-configs.target.internal
 status.storage.topic = mm2-status.target.internal
-
-offset.storage.partitions = 1
-config.storage.partitions = 1
-status.storage.partitions = 1
-
-offset.storage.replication.factor = 1
-config.storage.replication.factor = 1
-status.storage.replication.factor = 1
 
 # Target IAM auth
 target.security.protocol = SASL_SSL
@@ -296,11 +166,6 @@ target.sasl.mechanism = AWS_MSK_IAM
 target.sasl.jaas.config = software.amazon.msk.auth.iam.IAMLoginModule required;
 target.sasl.client.callback.handler.class = software.amazon.msk.auth.iam.IAMClientCallbackHandler
 
-# Timeouts
-admin.request.timeout.ms = 60000
-request.timeout.ms = 60000
-
-replication.policy.class = org.apache.kafka.connect.mirror.IdentityReplicationPolicy
 EOF
 fi
 
@@ -369,20 +234,17 @@ services:
       kafka:
         condition: service_healthy
     restart: "no"
+    volumes:
+      - ./config/transaction-v2-topics.txt:/config/transaction-v2-topics.txt:ro
     entrypoint: ["/bin/bash", "-ec"]
     command: |
-      for spec in \
-        'cdc.source.capture.v2:1:delete:604800000' \
-        'cdc.source.baseline.control.v2:1:compact:2592000000' \
-        'cdc.tx.control.v2:12:delete:2592000000' \
-        'cdc.tx.mutations.v2:12:delete:2592000000' \
-        'cdc.tx.baseline.v2:1:compact:2592000000' \
-        'cdc.tx.dlq.v2:3:delete:7776000000'; do
+      while IFS= read -r spec; do
+        [ -n "$$spec" ] || continue
         IFS=: read -r topic partitions policy retention <<<"$$spec"
         kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists \
           --topic "$$topic" --partitions "$$partitions" --replication-factor 1 \
           --config cleanup.policy="$$policy" --config retention.ms="$$retention"
-      done
+      done < /config/transaction-v2-topics.txt
 
   legacy-postgres:
     image: postgres:16-alpine
@@ -407,6 +269,7 @@ services:
       - wal_keep_size=256MB
     volumes:
       - legacy-postgres-data:/var/lib/postgresql/data
+      - ./config:/config:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d appdb"]
       interval: 5s
@@ -433,7 +296,7 @@ services:
           PGPASSWORD=postgres psql -v ON_ERROR_STOP=1 -h legacy-postgres -U postgres -d appdb -f /init/02-inventory.sql
           PGPASSWORD=postgres psql -v ON_ERROR_STOP=1 -h legacy-postgres -U postgres -d appdb -f /init/03-source-version-v2.sql
         else
-          installed=$$(PGPASSWORD=postgres psql -v ON_ERROR_STOP=1 -h legacy-postgres -U postgres -d appdb -Atqc "SELECT count(*) FROM source_cdc.schema_version WHERE version=3")
+          installed=$$(PGPASSWORD=postgres psql -v ON_ERROR_STOP=1 -h legacy-postgres -U postgres -d appdb -Atqc "SELECT count(*) FROM source_cdc.schema_version WHERE version=4")
           if [ "$$installed" != "1" ]; then
             echo "Incompatible source volume; recreate it to install the normalized source schema." >&2
             exit 1
@@ -604,6 +467,28 @@ EOF
 
 if [ -n "${msk_bootstrap_iam}" ]; then
 cat >> docker-compose.yml <<'EOF'
+  msk-topics-init:
+    image: confluentinc/cp-kafka:7.7.7
+    restart: "no"
+    networks: [cdc]
+    volumes:
+      - ./config/transaction-v2-topics.txt:/config/transaction-v2-topics.txt:ro
+      - ./libs/aws-msk-iam-auth-all.jar:/usr/share/java/kafka/aws-msk-iam-auth-all.jar:ro
+      - ./client.properties:/tmp/client.properties:ro
+    environment:
+      AWS_REGION: "${region}"
+      CLASSPATH: "/usr/share/java/kafka/aws-msk-iam-auth-all.jar"
+    entrypoint: ["/bin/bash", "-ec"]
+    command: |
+      while IFS= read -r spec; do
+        [ -n "$$spec" ] || continue
+        IFS=: read -r topic partitions policy retention <<<"$$spec"
+        [[ "$$topic" == cdc.tx.* ]] || continue
+        kafka-topics --bootstrap-server "${msk_bootstrap_iam}" --command-config /tmp/client.properties \
+          --create --if-not-exists --topic "$$topic" --partitions "$$partitions" \
+          --config cleanup.policy="$$policy" --config retention.ms="$$retention"
+      done < /config/transaction-v2-topics.txt
+
   mirrormaker2:
     image: confluentinc/cp-kafka-connect:7.8.0
     restart: unless-stopped
@@ -613,8 +498,11 @@ cat >> docker-compose.yml <<'EOF'
         condition: service_healthy
       dbz-init:
         condition: service_completed_successfully
+      msk-topics-init:
+        condition: service_completed_successfully
     volumes:
       - ./mm2.properties:/etc/kafka/mm2.properties:ro
+      - ./config/mm2-common.properties:/etc/kafka/mm2-common.properties:ro
       - ./libs/aws-msk-iam-auth-all.jar:/usr/share/java/kafka/aws-msk-iam-auth-all.jar:ro
       - ./connect-log4j.properties:/usr/config/connect-log4j.properties:ro
       - ./client.properties:/tmp/client.properties:ro
@@ -622,7 +510,7 @@ cat >> docker-compose.yml <<'EOF'
       AWS_REGION: "${region}"
       CLASSPATH: "/usr/share/java/kafka/aws-msk-iam-auth-all.jar"
     command: >
-      bash -lc "connect-mirror-maker /etc/kafka/mm2.properties"
+      bash -lc "cat /etc/kafka/mm2-common.properties /etc/kafka/mm2.properties > /tmp/mm2.properties && connect-mirror-maker /tmp/mm2.properties"
 EOF
 else
   echo "MSK bootstrap not provided; MirrorMaker2 service is disabled for EC2-only testing."

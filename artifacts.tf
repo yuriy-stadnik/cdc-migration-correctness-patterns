@@ -1,5 +1,6 @@
 resource "aws_s3_bucket" "cdc_artifacts" {
-  bucket = "${var.project}-${data.aws_caller_identity.current.account_id}-${var.aws_region}-artifacts"
+  bucket        = "${var.project}-${data.aws_caller_identity.current.account_id}-${var.aws_region}-artifacts"
+  force_destroy = true
 }
 
 resource "aws_s3_bucket_versioning" "cdc_artifacts" {

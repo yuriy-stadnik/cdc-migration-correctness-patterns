@@ -65,6 +65,8 @@ Every mutation carries a canonical source transaction ID, source record sequence
 ├── providers.tf              # Terraform and AWS provider configuration
 ├── security.tf               # Security groups
 ├── scripts/
+│   ├── aws-up.sh               # Start or repair the complete AWS lab
+│   ├── aws-down.sh             # Remove the complete AWS lab; no-op when absent
 │   ├── connect-kafka-mm2.sh   # macOS/Linux helper for EC2 Instance Connect SSH
 │   ├── connect-kafka-mm2.bat  # Windows helper for EC2 Instance Connect SSH
 │   └── msk/
@@ -208,11 +210,12 @@ The helper scripts can also detect or accept your public IP and set `TF_VAR_ssh_
 The main variables are defined in `variables.tf`:
 
 - `aws_region`: AWS region, default `us-east-1`
-- `enable_msk`: controls MSK Serverless + Lambda MSK event mappings, default `false`
+- `enable_msk`: provisions MSK Serverless, default `false`
+- `enable_msk_event_source_mappings`: enables Lambda consumers after MSK topics exist, default `false`
 - `project`: resource name prefix, default `kafka-mm2-msk-lab`
 - `ec2_instance_type`: EC2 host type, default `t3.large`
 - `ec2_root_volume_size`: root EBS volume size for the EC2 source emulator, default `80`
-- `ec2_msk_bootstrap_iam`: optional MSK IAM bootstrap string for MirrorMaker2 on EC2
+- `ec2_msk_bootstrap_iam`: optional external bootstrap override for EC2-only/external-MSK testing; managed MSK is wired automatically
 - `ssh_cidr`: allowed CIDR for SSH and optional Kafka test access, default `0.0.0.0/32`
 - `ec2_instance_connect_user_name`: IAM user allowed to push temporary EC2 Instance Connect SSH keys, default `terraform`
 - `db_name`: legacy variable retained for backward compatibility
@@ -255,31 +258,40 @@ Notes:
 
 The helper scripts below set `TF_VAR_ssh_cidr` before Terraform runs. They accept the IP as an argument, or read it from `MY_IP`, `PUBLIC_IP`, or `TF_VAR_ssh_cidr`.
 
-## Build Lambda
+## Build deployment artifacts
 
-Build the Java Lambda fat JAR before running Terraform apply:
+Build the Flink projector and Lambda from the same shared protocol/apply modules before running Terraform apply:
 
 ```bash
-cd lambda_java
-./gradlew clean build
-cd ..
+./scripts/build-deployment-artifacts.sh
 ```
 
-Terraform expects the JAR at:
+Terraform expects both JARs:
 
 ```text
+transaction-projector/build/libs/transaction-projector-all.jar
 lambda_java/build/libs/msk-to-aurora-lambda-1.0.0.jar
 ```
 
 ## Deploy
 
-Initialize and apply Terraform:
+Start or repair the complete AWS environment. The second argument may be an IPv4 address or CIDR; when omitted, the script reads `MY_IP`, `PUBLIC_IP`, or `TF_VAR_ssh_cidr`, then attempts public-IP detection.
 
 ```bash
-terraform init
-terraform plan
-terraform apply
+./scripts/aws-up.sh us-east-1 203.0.113.10/32
 ```
+
+The script initializes Terraform, builds the deployment artifacts, converges missing or partially created infrastructure with mappings disabled, then retries the mapping-enabled apply until the MSK topics exist. Re-running it against an already complete environment is safe and produces a normal no-change Terraform apply.
+
+Optional controls:
+
+```bash
+SKIP_BUILD=1 ./scripts/aws-up.sh us-east-1 203.0.113.10/32
+AUTO_APPROVE=0 ./scripts/aws-up.sh us-east-1 203.0.113.10/32
+MAPPING_APPLY_ATTEMPTS=20 RETRY_DELAY_SECONDS=30 ./scripts/aws-up.sh us-east-1 203.0.113.10/32
+```
+
+`SKIP_BUILD=1` requires both deployable JARs to exist. The lower-level `scripts/msk/msk-up.sh` and `scripts/msk/msk-enable-mappings.sh` remain available when the two phases need to be controlled manually.
 
 Important outputs include:
 
@@ -369,7 +381,7 @@ The main EC2 host uses `user_data.sh.tpl` to emulate the on-premises side of the
 - Install Docker Compose v2.
 - Download the AWS MSK IAM auth JAR.
 - Download the transaction-projector artifact.
-- Create normalized PostgreSQL init scripts.
+- Install the same normalized PostgreSQL SQL, Debezium connector, topic specification, MM2 defaults, and E2E transaction SQL used locally.
 - Start local PostgreSQL with logical replication enabled.
 - Register a Debezium PostgreSQL CDC connector.
 - Start local Kafka and Zookeeper.
@@ -476,7 +488,7 @@ After MSK is enabled and the EC2 host is configured with the current MSK bootstr
 ./scripts/run-aws-e2e-test.sh us-east-1 ~/.ssh/temp_ec2_key
 ```
 
-The existing AWS E2E script still targets the earlier six-table/seven-mutation deployment contract. It was intentionally not changed or run during the local simplification and must be reconciled before AWS validation.
+The AWS E2E script uses the same four-row insert and two-row update SQL as the local E2E test. It checks four- and two-mutation receipts respectively. The script is prepared but was not run as part of this change.
 
 Optional environment overrides:
 
@@ -490,10 +502,12 @@ EMAIL=aws-e2e-778802093@example.com \
 
 ## Destroy
 
-To remove the project resources:
+Remove every resource in the current Terraform state:
 
 ```bash
-terraform destroy
+./scripts/aws-down.sh us-east-1
 ```
 
-Because this project creates billable infrastructure, destroy the environment when it is no longer needed.
+The script is safe to rerun: it exits successfully when no Terraform-managed environment was started and retries a partially completed destroy. If deployment JARs are missing but state exists, it rebuilds them because the Terraform configuration must evaluate their hashes before destroying resources. The versioned artifact bucket uses `force_destroy`, so teardown also deletes its retained object versions.
+
+Set `AUTO_APPROVE=0` to retain Terraform's interactive confirmation. Because this project creates billable infrastructure, destroy the environment when it is no longer needed.

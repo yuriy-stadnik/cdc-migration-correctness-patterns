@@ -87,6 +87,8 @@ resource "aws_lambda_function" "consumer" {
 
   timeout     = 60
   memory_size = 1024
+  # The simplified apply service deliberately has one writer in both local and AWS environments.
+  reserved_concurrent_executions = 1
 
   filename         = "${path.module}/lambda_java/build/libs/msk-to-aurora-lambda-1.0.0.jar"
   source_code_hash = filebase64sha256("${path.module}/lambda_java/build/libs/msk-to-aurora-lambda-1.0.0.jar")
@@ -110,13 +112,22 @@ resource "aws_lambda_function" "consumer" {
   depends_on = [
     aws_rds_cluster_instance.aurora_destination_instance
   ]
+
+  lifecycle {
+    precondition {
+      condition     = !var.enable_msk_event_source_mappings || var.enable_msk
+      error_message = "enable_msk_event_source_mappings requires enable_msk=true."
+    }
+  }
 }
 
 locals {
+  transaction_topic_specs = [
+    for line in split("\n", trimspace(file("${path.module}/config/transaction-v2-topics.txt"))) :
+    split(":", trimspace(line)) if trimspace(line) != ""
+  ]
   lambda_msk_topics = toset([
-    "cdc.tx.control.v2",
-    "cdc.tx.mutations.v2",
-    "cdc.tx.dlq.v2"
+    for spec in local.transaction_topic_specs : spec[0] if startswith(spec[0], "cdc.tx.")
   ])
 }
 
@@ -143,7 +154,7 @@ resource "aws_lambda_permission" "transaction_retry_sweep" {
 
 # MSK -> Lambda triggers. Lambda supports one Kafka topic per event source mapping.
 resource "aws_lambda_event_source_mapping" "msk_operational" {
-  for_each = var.enable_msk ? local.lambda_msk_topics : toset([])
+  for_each = var.enable_msk && var.enable_msk_event_source_mappings ? local.lambda_msk_topics : toset([])
 
   event_source_arn = aws_msk_serverless_cluster.this[0].arn
   function_name    = aws_lambda_function.consumer.arn

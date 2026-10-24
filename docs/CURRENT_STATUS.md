@@ -1,6 +1,6 @@
 # Current status
 
-As of **2026-10-23**, the simplified local transaction-boundary lab is green.
+As of **2026-10-24**, the simplified local transaction-boundary lab is green and the AWS deployment wiring is aligned but not deployed or AWS-tested.
 
 ## Verdict
 
@@ -28,11 +28,20 @@ Removed local complexity includes dynamic baseline reconciliation/topics/tables,
 | Local Kafka apply-consumer Gradle tests | passed |
 | Disposable PostgreSQL source trigger/journal suite | 6/6 passed |
 | Source and cloud Compose configuration validation | passed |
+| Rendered EC2 user-data Bash and generated Compose validation | passed |
+| Terraform formatting and offline configuration validation | passed |
+| Shared projector and Lambda artifact build/tests | passed |
 | Shell syntax checks | passed |
 | Clean-volume full local Debezium/Flink/MM2/apply E2E | passed |
 | First cross-schema receipt | 4 mutations |
 | Second cross-schema update receipt | 2 mutations |
 
-## AWS boundary
+## AWS preparation
 
-No AWS API, deployment, or real AWS test was used. Terraform, `user_data.sh.tpl`, Kafka UI, the private network-test EC2 host, and AWS scripts were not modified. Shared Java/SQL artifacts now implement the local simplification while AWS wiring still describes the earlier baseline/six-table contract. Reconcile those differences and perform an isolated AWS rehearsal before any AWS deployment.
+- Local Compose and AWS EC2 bootstrap share source SQL, connector JSON, topic specifications, MM2 defaults, and E2E transaction SQL.
+- The projector and Lambda artifacts build from the same protocol/apply modules through `scripts/build-deployment-artifacts.sh`.
+- Terraform derives Lambda's three MSK topics from the shared topic file.
+- Lambda reserved concurrency is one, matching the single-writer apply model.
+- Source schema version 4 and the destination migration checksum reject incompatible retained lab volumes.
+
+No AWS API, deployment, or real AWS test was used. AWS remains unverified until an isolated rehearsal is performed.

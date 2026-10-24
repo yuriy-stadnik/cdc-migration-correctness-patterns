@@ -246,5 +246,5 @@ GRANT SELECT ON source_cdc.transaction_context,source_cdc.revision_journal TO db
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA source_cdc FROM PUBLIC,dbz,source_writer;
 GRANT EXECUTE ON FUNCTION source_cdc.begin_write() TO source_writer;
 
-INSERT INTO source_cdc.schema_version(version) VALUES(3) ON CONFLICT DO NOTHING;
+INSERT INTO source_cdc.schema_version(version) VALUES(4) ON CONFLICT DO NOTHING;
 COMMIT;

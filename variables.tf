@@ -4,7 +4,13 @@ variable "aws_region" {
 }
 
 variable "enable_msk" {
-  description = "When true, provision MSK Serverless and MSK-triggered Lambda mappings. Keep false for local-only or EC2-only testing to reduce cost."
+  description = "When true, provision MSK Serverless and wire the EC2 mirror to it. Lambda mappings are controlled separately. Keep false for local-only or EC2-only testing to reduce cost."
+  type        = bool
+  default     = false
+}
+
+variable "enable_msk_event_source_mappings" {
+  description = "Enable Lambda MSK event mappings only after the EC2 msk-topics-init service has created the shared transaction topics. Requires enable_msk=true."
   type        = bool
   default     = false
 }
@@ -26,7 +32,7 @@ variable "ec2_root_volume_size" {
 }
 
 variable "ec2_msk_bootstrap_iam" {
-  description = "Optional MSK IAM bootstrap string for MirrorMaker2 on the EC2 host. Leave empty for EC2-only PostgreSQL, CDC, Kafka, and Flink testing."
+  description = "Optional external MSK IAM bootstrap override used only when enable_msk=false. Managed MSK deployments inject their bootstrap endpoint automatically."
   type        = string
   default     = ""
 }

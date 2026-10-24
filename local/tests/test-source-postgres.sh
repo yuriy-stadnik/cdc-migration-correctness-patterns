@@ -31,7 +31,7 @@ require_source_count 4 \
 require_source_count 3 \
   "SELECT count(*) FROM information_schema.table_constraints WHERE table_schema='inventory' AND constraint_type='FOREIGN KEY'"
 require_source_count 1 \
-  "SELECT count(*) FROM source_cdc.schema_version WHERE version=3"
+  "SELECT count(*) FROM source_cdc.schema_version WHERE version=4"
 require_source_count 6 \
   "SELECT count(*) FROM pg_publication_tables WHERE pubname='source_cdc_v2'"
 require_source_count 0 \
