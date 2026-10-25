@@ -237,14 +237,15 @@ services:
     volumes:
       - ./config/transaction-v2-topics.txt:/config/transaction-v2-topics.txt:ro
     entrypoint: ["/bin/bash", "-ec"]
-    command: |
-      while IFS= read -r spec; do
-        [ -n "$$spec" ] || continue
-        IFS=: read -r topic partitions policy retention <<<"$$spec"
-        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists \
-          --topic "$$topic" --partitions "$$partitions" --replication-factor 1 \
-          --config cleanup.policy="$$policy" --config retention.ms="$$retention"
-      done < /config/transaction-v2-topics.txt
+    command:
+      - |
+        while IFS= read -r spec; do
+          [ -n "$$spec" ] || continue
+          IFS=: read -r topic partitions policy retention <<<"$$spec"
+          kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists \
+            --topic "$$topic" --partitions "$$partitions" --replication-factor 1 \
+            --config cleanup.policy="$$policy" --config retention.ms="$$retention"
+        done < /config/transaction-v2-topics.txt
 
   legacy-postgres:
     image: postgres:16-alpine
@@ -440,14 +441,13 @@ services:
       CAPTURE_SCOPE_ID: inventory-direct-v2
     volumes:
       - ./flink-usrlib:/opt/flink/usrlib:ro
-    command: >
-      bash -lc "
-        set -e;
-        until (echo > /dev/tcp/flink-jobmanager/8081) >/dev/null 2>&1; do sleep 1; done;
-        /opt/flink/bin/flink run -d -m flink-jobmanager:8081 \
-          -c com.example.cdc.projector.TransactionProjectorJob \
-          /opt/flink/usrlib/transaction-projector-all.jar;
-      "
+    command:
+      - bash
+      - -lc
+      - |
+        set -e
+        until (echo > /dev/tcp/flink-jobmanager/8081) >/dev/null 2>&1; do sleep 1; done
+        /opt/flink/bin/flink run -d -m flink-jobmanager:8081 -c com.example.cdc.projector.TransactionProjectorJob /opt/flink/usrlib/transaction-projector-all.jar
 
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
@@ -479,15 +479,16 @@ cat >> docker-compose.yml <<'EOF'
       AWS_REGION: "${region}"
       CLASSPATH: "/usr/share/java/kafka/aws-msk-iam-auth-all.jar"
     entrypoint: ["/bin/bash", "-ec"]
-    command: |
-      while IFS= read -r spec; do
-        [ -n "$$spec" ] || continue
-        IFS=: read -r topic partitions policy retention <<<"$$spec"
-        [[ "$$topic" == cdc.tx.* ]] || continue
-        kafka-topics --bootstrap-server "${msk_bootstrap_iam}" --command-config /tmp/client.properties \
-          --create --if-not-exists --topic "$$topic" --partitions "$$partitions" \
-          --config cleanup.policy="$$policy" --config retention.ms="$$retention"
-      done < /config/transaction-v2-topics.txt
+    command:
+      - |
+        while IFS= read -r spec; do
+          [ -n "$$spec" ] || continue
+          IFS=: read -r topic partitions policy retention <<<"$$spec"
+          [[ "$$topic" == cdc.tx.* ]] || continue
+          kafka-topics --bootstrap-server "${msk_bootstrap_iam}" --command-config /tmp/client.properties \
+            --create --if-not-exists --topic "$$topic" --partitions "$$partitions" \
+            --config cleanup.policy="$$policy" --config retention.ms="$$retention"
+        done < /config/transaction-v2-topics.txt
 
   mirrormaker2:
     image: confluentinc/cp-kafka-connect:7.8.0

@@ -2,7 +2,7 @@ plugins {
     id 'java'
 }
 
-group = 'com.cd ..'
+group = 'com.example.cdc'
 version = '1.0.0'
 
 java {
@@ -34,6 +34,7 @@ dependencies {
 
     testImplementation platform('org.junit:junit-bom:5.10.3')
     testImplementation 'org.junit.jupiter:junit-jupiter'
+    testImplementation 'io.zonky.test:embedded-postgres:2.1.0'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
@@ -56,4 +57,5 @@ tasks.build {
 
 tasks.test {
     useJUnitPlatform()
+    systemProperty 'test.runtime.classpath', sourceSets.test.runtimeClasspath.asPath
 }

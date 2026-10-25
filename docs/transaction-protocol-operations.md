@@ -49,6 +49,7 @@ python3 local/tests/test-source-version-v2.py
 gradle -p transaction-protocol test
 gradle -p transaction-projector test
 gradle -p transaction-apply test
+gradle -p lambda_java test
 docker compose -f local/source/docker-compose.yml config -q
 docker compose -f local/cloud/docker-compose.yml config -q
 RESET=1 ./local/scripts/run-local-e2e.sh
@@ -74,8 +75,10 @@ ORDER BY dependent_transaction_id,owner_key;
 
 AWS wiring now consumes the same source SQL, connector JSON, topic specification, MM2 defaults, E2E transaction SQL, projector, protocol, and apply modules as local deployment. Lambda reserved concurrency is one so the AWS adapter preserves the simplified single-writer assumption.
 
+Run `./scripts/test-aws-offline.sh` before deployment. It includes Lambda batch/failure unit tests, a real PostgreSQL Lambda-adapter integration test with idempotent replay, rendered EC2 bootstrap/Compose validation, lifecycle retry tests, shared Java tests, and Terraform validation without calling AWS.
+
 Build both deployable JARs with `./scripts/build-deployment-artifacts.sh`. Existing source volumes at schema version 3 and destination databases with the previous migration checksum are intentionally rejected; use clean lab resources for this contract.
 
 MSK activation is two-phase: deploy with `enable_msk=true` and mappings disabled, wait for the EC2 `msk-topics-init` service to create the three shared transaction topics, then set `enable_msk_event_source_mappings=true`. This follows AWS's requirement that the Kafka topic exist before its Lambda event-source mapping.
 
-Only local/offline verification was performed. No AWS API, deployment, or AWS E2E test was run, so an isolated AWS rehearsal is still required before declaring AWS readiness.
+An isolated live AWS deployment and `scripts/run-aws-e2e-test.sh` rehearsal passed on 2026-10-24. The safe orphan-ENI cleanup path in `scripts/aws-down.sh` is additionally covered by offline lifecycle tests and requires explicit opt-in before deleting a detached interface.

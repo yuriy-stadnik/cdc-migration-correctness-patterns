@@ -67,6 +67,7 @@ Every mutation carries a canonical source transaction ID, source record sequence
 ├── scripts/
 │   ├── aws-up.sh               # Start or repair the complete AWS lab
 │   ├── aws-down.sh             # Remove the complete AWS lab; no-op when absent
+│   ├── test-aws-offline.sh      # Unit/integration/config checks without AWS access
 │   ├── connect-kafka-mm2.sh   # macOS/Linux helper for EC2 Instance Connect SSH
 │   ├── connect-kafka-mm2.bat  # Windows helper for EC2 Instance Connect SSH
 │   └── msk/
@@ -482,13 +483,21 @@ The Lambda environment variables are set by Terraform:
 
 ## AWS E2E Test
 
+Run the complete offline AWS-oriented suite before using an AWS account:
+
+```bash
+./scripts/test-aws-offline.sh
+```
+
+It runs the protocol, apply, projector, and Lambda tests—including the AWS-shaped MSK batch through the Lambda handler into embedded PostgreSQL—plus lifecycle retry tests, rendered EC2 user-data/Compose validation, and Terraform validation. It does not call AWS.
+
 After MSK is enabled and the EC2 host is configured with the current MSK bootstrap endpoint, run the full AWS path validation with:
 
 ```bash
 ./scripts/run-aws-e2e-test.sh us-east-1 ~/.ssh/temp_ec2_key
 ```
 
-The AWS E2E script uses the same four-row insert and two-row update SQL as the local E2E test. It checks four- and two-mutation receipts respectively. The script is prepared but was not run as part of this change.
+The AWS E2E script uses the same four-row insert and two-row update SQL as the local E2E test. It verifies transaction boundaries across both destination schemas, four- and two-mutation receipts, deterministic idempotency keys, immutable producer claims, version-two producer lineage, and transaction-DAG edges. A live isolated AWS rehearsal completed successfully on 2026-10-24.
 
 Optional environment overrides:
 
@@ -508,6 +517,12 @@ Remove every resource in the current Terraform state:
 ./scripts/aws-down.sh us-east-1
 ```
 
-The script is safe to rerun: it exits successfully when no Terraform-managed environment was started and retries a partially completed destroy. If deployment JARs are missing but state exists, it rebuilds them because the Terraform configuration must evaluate their hashes before destroying resources. The versioned artifact bucket uses `force_destroy`, so teardown also deletes its retained object versions.
+The script is safe to rerun: it exits successfully when no Terraform-managed environment was started and retries a partially completed destroy. If AWS leaves a detached ENI after deleting its parent service, the script stops before another long Terraform retry and prints the blocking ENI. To let it delete only a detached, available, non-requester-managed ENI whose subnet and security groups remain in this project's Terraform state, rerun with `CLEANUP_ORPHAN_ENIS=1`. ENIs that do not meet every safety check are never deleted automatically.
+
+```bash
+CLEANUP_ORPHAN_ENIS=1 ./scripts/aws-down.sh us-east-1
+```
+
+If deployment JARs are missing but state exists, the script rebuilds them because the Terraform configuration must evaluate their hashes before destroying resources. The versioned artifact bucket uses `force_destroy`, so teardown also deletes its retained object versions.
 
 Set `AUTO_APPROVE=0` to retain Terraform's interactive confirmation. Because this project creates billable infrastructure, destroy the environment when it is no longer needed.

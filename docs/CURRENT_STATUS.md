@@ -31,6 +31,9 @@ Removed local complexity includes dynamic baseline reconciliation/topics/tables,
 | Rendered EC2 user-data Bash and generated Compose validation | passed |
 | Terraform formatting and offline configuration validation | passed |
 | Shared projector and Lambda artifact build/tests | passed |
+| Lambda MSK-adapter unit tests | passed |
+| Lambda-to-embedded-PostgreSQL integration and idempotent replay | passed |
+| AWS lifecycle empty/partial/complete-state tests | passed |
 | Shell syntax checks | passed |
 | Clean-volume full local Debezium/Flink/MM2/apply E2E | passed |
 | First cross-schema receipt | 4 mutations |
@@ -42,6 +45,8 @@ Removed local complexity includes dynamic baseline reconciliation/topics/tables,
 - The projector and Lambda artifacts build from the same protocol/apply modules through `scripts/build-deployment-artifacts.sh`.
 - Terraform derives Lambda's three MSK topics from the shared topic file.
 - Lambda reserved concurrency is one, matching the single-writer apply model.
+- The documented Terraform deployer policy covers the artifact bucket, EventBridge retry sweep, Lambda permissions, and reserved concurrency.
+- `scripts/test-aws-offline.sh` is the no-AWS unit/integration/configuration verification entry point.
 - Source schema version 4 and the destination migration checksum reject incompatible retained lab volumes.
 
-No AWS API, deployment, or real AWS test was used. AWS remains unverified until an isolated rehearsal is performed.
+An isolated live AWS deployment and full transaction E2E passed on 2026-10-24. The rehearsal also exposed EC2 user-data command rendering defects that are now covered by normalized Compose tests. The orphan-ENI teardown recovery added after the rehearsal is covered by offline lifecycle tests; its automatic cleanup path remains explicitly opt-in.

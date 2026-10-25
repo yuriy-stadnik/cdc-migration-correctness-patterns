@@ -45,12 +45,17 @@ aws ec2-instance-connect send-ssh-public-key \
 set -euo pipefail
 DB_PASSWORD="$(printf '%s' "${DB_PASSWORD_B64}" | base64 --decode)"
 
+query_value() {
+  local sql="$1"
+  sudo docker compose -f /opt/lab/docker-compose.yml exec -T -e PGPASSWORD="${DB_PASSWORD}" legacy-postgres \
+    psql -h "${DESTINATION_ENDPOINT}" -U appuser -d "${DESTINATION_DB_NAME}" -Atc "${sql}" </dev/null
+}
+
 wait_for_count() {
   local label="$1" expected="$2" sql="$3" start now out
   start="$(date +%s)"
   while true; do
-    out="$(sudo docker compose -f /opt/lab/docker-compose.yml exec -T -e PGPASSWORD="${DB_PASSWORD}" legacy-postgres \
-      psql -h "${DESTINATION_ENDPOINT}" -U appuser -d "${DESTINATION_DB_NAME}" -Atc "${sql}" 2>/dev/null || true)"
+    out="$(query_value "${sql}" 2>/dev/null || true)"
     if [[ "${out}" == "${expected}" ]]; then
       echo "${label}: ok (${out})"
       return 0
@@ -68,30 +73,38 @@ echo "Writing the shared four-row source transaction..."
 sudo docker compose -f /opt/lab/docker-compose.yml exec -T -e PGPASSWORD=source_app legacy-postgres \
   psql -v ON_ERROR_STOP=1 -v customer_id="${CID}" -v order_id="${OID}" \
     -v email="${EMAIL}" -v product="${PRODUCT}" -U source_app -d appdb \
-    -f /config/e2e-source-insert.sql
+    -f /config/e2e-source-insert.sql </dev/null
 
 echo "Checking projected transaction topics..."
 sudo docker compose -f /opt/lab/docker-compose.yml exec -T kafka bash -lc \
-  "kafka-console-consumer --bootstrap-server kafka:29092 --topic cdc.tx.mutations.v2 --from-beginning --timeout-ms 30000 --max-messages 2000 2>/dev/null | grep -q '${PRODUCT}'"
+  "kafka-console-consumer --bootstrap-server kafka:29092 --topic cdc.tx.mutations.v2 --from-beginning --timeout-ms 30000 --max-messages 2000 2>/dev/null | grep -q '${PRODUCT}'" </dev/null
 sudo docker compose -f /opt/lab/docker-compose.yml exec -T mirrormaker2 bash -lc \
-  "kafka-console-consumer --bootstrap-server '${MSK_BOOTSTRAP}' --consumer.config /tmp/client.properties --topic cdc.tx.mutations.v2 --from-beginning --timeout-ms 30000 --max-messages 2000 2>/dev/null | grep -q '${PRODUCT}'"
+  "kafka-console-consumer --bootstrap-server '${MSK_BOOTSTRAP}' --consumer.config /tmp/client.properties --topic cdc.tx.mutations.v2 --from-beginning --timeout-ms 30000 --max-messages 2000 2>/dev/null | grep -q '${PRODUCT}'" </dev/null
 
 wait_for_count "client.customers" 1 "SELECT count(*) FROM client.customers WHERE id=${CID}"
 wait_for_count "operational.products" 1 "SELECT count(*) FROM operational.products WHERE name='${PRODUCT}'"
 wait_for_count "operational.orders" 1 "SELECT count(*) FROM operational.orders WHERE id=${OID}"
 wait_for_count "operational.order_items" 1 "SELECT count(*) FROM operational.order_items WHERE order_id=${OID}"
 wait_for_count "four-row atomic receipt" 1 "SELECT count(*) FROM cdc.v2_receipt r JOIN client.customers c ON c.source_tx_id=r.transaction_id JOIN operational.orders o ON o.source_tx_id=r.transaction_id WHERE c.id=${CID} AND o.id=${OID} AND r.mutation_count=4"
+FIRST_TX="$(query_value "SELECT source_tx_id FROM client.customers WHERE id=${CID}")"
+wait_for_count "one transaction boundary across both schemas" 1 "SELECT count(DISTINCT source_tx_id) FROM (SELECT source_tx_id FROM client.customers WHERE id=${CID} UNION ALL SELECT source_tx_id FROM operational.products WHERE name='${PRODUCT}' UNION ALL SELECT source_tx_id FROM operational.orders WHERE id=${OID} UNION ALL SELECT source_tx_id FROM operational.order_items WHERE order_id=${OID}) applied"
+wait_for_count "four immutable producer claims" 4 "SELECT count(*) FROM cdc.v2_producer WHERE producer_type='TRANSACTION' AND producer_id='${FIRST_TX}' AND final_revision"
+wait_for_count "four deterministic idempotency keys" 4 "SELECT count(DISTINCT idempotency_key) FROM (SELECT idempotency_key FROM client.customers WHERE id=${CID} UNION ALL SELECT idempotency_key FROM operational.products WHERE name='${PRODUCT}' UNION ALL SELECT idempotency_key FROM operational.orders WHERE id=${OID} UNION ALL SELECT idempotency_key FROM operational.order_items WHERE order_id=${OID}) applied"
 
 echo "Writing the shared two-row lineage update..."
 sudo docker compose -f /opt/lab/docker-compose.yml exec -T -e PGPASSWORD=source_app legacy-postgres \
   psql -v ON_ERROR_STOP=1 -v customer_id="${CID}" -v order_id="${OID}" \
-    -U source_app -d appdb -f /config/e2e-source-update.sql
+    -U source_app -d appdb -f /config/e2e-source-update.sql </dev/null
 
 wait_for_count "customer version two" 1 "SELECT count(*) FROM client.customers WHERE id=${CID} AND version=2 AND status='VERIFIED'"
 wait_for_count "order version two" 1 "SELECT count(*) FROM operational.orders WHERE id=${OID} AND version=2 AND status='SHIPPED'"
 wait_for_count "two-row atomic receipt" 1 "SELECT count(*) FROM cdc.v2_receipt r JOIN client.customers c ON c.source_tx_id=r.transaction_id JOIN operational.orders o ON o.source_tx_id=r.transaction_id WHERE c.id=${CID} AND o.id=${OID} AND r.mutation_count=2"
+SECOND_TX="$(query_value "SELECT source_tx_id FROM client.customers WHERE id=${CID}")"
+wait_for_count "second transaction boundary" 1 "SELECT count(*) FROM operational.orders WHERE id=${OID} AND source_tx_id='${SECOND_TX}'"
+wait_for_count "transaction DAG edges" 2 "SELECT count(*) FROM cdc.transaction_dependency_graph WHERE predecessor_transaction_id='${FIRST_TX}' AND dependent_transaction_id='${SECOND_TX}' AND dependency_type='WRITE_PREDECESSOR'"
+wait_for_count "version-two producer lineage" 2 "SELECT count(*) FROM cdc.v2_owner_state WHERE version=2 AND producer_type='TRANSACTION' AND producer_id='${SECOND_TX}'"
 
-echo "REMOTE_FULL_E2E_OK CID=${CID} OID=${OID} EMAIL=${EMAIL}"
+echo "REMOTE_FULL_E2E_OK CID=${CID} OID=${OID} FIRST_TX=${FIRST_TX} SECOND_TX=${SECOND_TX} EMAIL=${EMAIL}"
 REMOTE
 } | ssh -o StrictHostKeyChecking=accept-new -i "${KEY_PATH}" "ec2-user@${INSTANCE_PUBLIC_IP}" \
   "CID='${CID}' OID='${OID}' EMAIL='${EMAIL}' PRODUCT='${PRODUCT}' MSK_BOOTSTRAP='${MSK_BOOTSTRAP}' \
