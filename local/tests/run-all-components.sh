@@ -4,6 +4,9 @@ set -euo pipefail
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 for test_script in \
+  test-aws-lifecycle-scripts.sh \
+  test-aws-user-data-render.sh \
+  test-shared-deployment-config.sh \
   test-source-postgres.sh \
   test-source-kafka.sh \
   test-debezium-connect.sh \

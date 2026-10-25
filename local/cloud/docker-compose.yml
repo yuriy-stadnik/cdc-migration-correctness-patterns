@@ -7,8 +7,7 @@ volumes:
   cloud-zookeeper-data: {}
   cloud-zookeeper-log: {}
   cloud-kafka-data: {}
-  cloud-client-postgres-data: {}
-  cloud-operational-postgres-data: {}
+  cloud-destination-postgres-data: {}
 
 services:
   cloud-zookeeper:
@@ -55,72 +54,44 @@ services:
       timeout: 10s
       retries: 30
 
-  cloud-client-postgres:
+  cloud-destination-postgres:
     image: postgres:16-alpine
-    hostname: cloud-client-postgres
-    container_name: local-cloud-client-postgres
+    hostname: cloud-destination-postgres
+    container_name: local-cloud-destination-postgres
     networks: [cdc-migration-local]
     ports:
       - "5434:5432"
     environment:
-      POSTGRES_DB: clientdb
+      POSTGRES_DB: destinationdb
       POSTGRES_USER: appuser
       POSTGRES_PASSWORD: apppass
     volumes:
-      - cloud-client-postgres-data:/var/lib/postgresql/data
-      - ./postgres/client-init:/docker-entrypoint-initdb.d:ro
+      - cloud-destination-postgres-data:/var/lib/postgresql/data
+      - ../../db/migration:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U appuser -d clientdb"]
-      interval: 5s
-      timeout: 3s
-      retries: 30
-
-  cloud-operational-postgres:
-    image: postgres:16-alpine
-    hostname: cloud-operational-postgres
-    container_name: local-cloud-operational-postgres
-    networks: [cdc-migration-local]
-    ports:
-      - "5435:5432"
-    environment:
-      POSTGRES_DB: operationaldb
-      POSTGRES_USER: appuser
-      POSTGRES_PASSWORD: apppass
-    volumes:
-      - cloud-operational-postgres-data:/var/lib/postgresql/data
-      - ./postgres/operational-init:/docker-entrypoint-initdb.d:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U appuser -d operationaldb"]
+      test: ["CMD-SHELL", "pg_isready -U appuser -d destinationdb"]
       interval: 5s
       timeout: 3s
       retries: 30
 
   local-lambda:
     build:
-      context: ./lambda-consumer
+      context: ../..
+      dockerfile: local/cloud/lambda-consumer/Dockerfile
     container_name: local-cloud-lambda
     networks: [cdc-migration-local]
     depends_on:
       cloud-kafka:
         condition: service_healthy
-      cloud-client-postgres:
-        condition: service_healthy
-      cloud-operational-postgres:
+      cloud-destination-postgres:
         condition: service_healthy
     environment:
       KAFKA_BOOTSTRAP_SERVERS: "cloud-kafka:39092"
-      KAFKA_GROUP_ID: "local-lambda-to-postgres"
-      KAFKA_TOPICS: "pg1.transaction,client.customers,client.addresses,operational.products,operational.orders,operational.order_items,operational.contact_numbers"
-      CLIENT_DB_HOST: "cloud-client-postgres"
-      CLIENT_DB_PORT: "5432"
-      CLIENT_DB_NAME: "clientdb"
-      CLIENT_DB_USER: "appuser"
-      CLIENT_DB_PASSWORD: "apppass"
-      OPERATIONAL_DB_HOST: "cloud-operational-postgres"
-      OPERATIONAL_DB_PORT: "5432"
-      OPERATIONAL_DB_NAME: "operationaldb"
-      OPERATIONAL_DB_USER: "appuser"
-      OPERATIONAL_DB_PASSWORD: "apppass"
+      DESTINATION_DB_HOST: "cloud-destination-postgres"
+      DESTINATION_DB_PORT: "5432"
+      DESTINATION_DB_NAME: "destinationdb"
+      DESTINATION_DB_USER: "appuser"
+      DESTINATION_DB_PASSWORD: "apppass"
     restart: unless-stopped
 
   cloud-kafka-ui:

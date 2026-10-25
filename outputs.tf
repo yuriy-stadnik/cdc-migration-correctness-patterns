@@ -42,32 +42,34 @@ output "msk_bootstrap_sasl_iam" {
 }
 
 output "aurora_client_endpoint" {
-  value = aws_rds_cluster.aurora_client.endpoint
+  description = "Compatibility alias; both schemas now share this database."
+  value       = aws_rds_cluster.aurora_destination.endpoint
 }
 
 output "aurora_operational_endpoint" {
-  value = aws_rds_cluster.aurora_operational.endpoint
+  description = "Compatibility alias; both schemas now share this database."
+  value       = aws_rds_cluster.aurora_destination.endpoint
 }
 
 output "aurora_endpoint" {
   description = "Backward-compatible alias for operational Aurora endpoint."
-  value       = aws_rds_cluster.aurora_operational.endpoint
+  value       = aws_rds_cluster.aurora_destination.endpoint
 }
 
 output "msk_cluster_arn" {
   value = try(aws_msk_serverless_cluster.this[0].arn, null)
 }
 output "aurora_client_master_secret_arn" {
-  value = try(aws_rds_cluster.aurora_client.master_user_secret[0].secret_arn, null)
+  value = try(aws_rds_cluster.aurora_destination.master_user_secret[0].secret_arn, null)
 }
 
 output "aurora_operational_master_secret_arn" {
-  value = try(aws_rds_cluster.aurora_operational.master_user_secret[0].secret_arn, null)
+  value = try(aws_rds_cluster.aurora_destination.master_user_secret[0].secret_arn, null)
 }
 
 output "aurora_master_secret_arn" {
   description = "Backward-compatible alias for operational Aurora secret ARN."
-  value       = try(aws_rds_cluster.aurora_operational.master_user_secret[0].secret_arn, null)
+  value       = try(aws_rds_cluster.aurora_destination.master_user_secret[0].secret_arn, null)
 }
 
 output "aurora_port" {

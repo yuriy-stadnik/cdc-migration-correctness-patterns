@@ -15,8 +15,8 @@ if docker logs local-source-mirrormaker2 --tail 200 2>&1 \
   exit 1
 fi
 
-require_topic local-cloud-kafka cloud-kafka:39092 client.customers
-require_topic local-cloud-kafka cloud-kafka:39092 client.addresses
-require_topic local-cloud-kafka cloud-kafka:39092 operational.orders
+require_topic local-cloud-kafka cloud-kafka:39092 cdc.tx.control.v2
+require_topic local-cloud-kafka cloud-kafka:39092 cdc.tx.mutations.v2
+require_topic local-cloud-kafka cloud-kafka:39092 cdc.tx.dlq.v2
 
 echo "mirrormaker2: ok"

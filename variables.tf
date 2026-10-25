@@ -4,7 +4,13 @@ variable "aws_region" {
 }
 
 variable "enable_msk" {
-  description = "When true, provision MSK Serverless and MSK-triggered Lambda mappings. Keep false for local-only or EC2-only testing to reduce cost."
+  description = "When true, provision MSK Serverless and wire the EC2 mirror to it. Lambda mappings are controlled separately. Keep false for local-only or EC2-only testing to reduce cost."
+  type        = bool
+  default     = false
+}
+
+variable "enable_msk_event_source_mappings" {
+  description = "Enable Lambda MSK event mappings only after the EC2 msk-topics-init service has created the shared transaction topics. Requires enable_msk=true."
   type        = bool
   default     = false
 }
@@ -26,7 +32,7 @@ variable "ec2_root_volume_size" {
 }
 
 variable "ec2_msk_bootstrap_iam" {
-  description = "Optional MSK IAM bootstrap string for MirrorMaker2 on the EC2 host. Leave empty for EC2-only PostgreSQL, CDC, Kafka, and Flink testing."
+  description = "Optional external MSK IAM bootstrap override used only when enable_msk=false. Managed MSK deployments inject their bootstrap endpoint automatically."
   type        = string
   default     = ""
 }
@@ -34,7 +40,7 @@ variable "ec2_msk_bootstrap_iam" {
 variable "mm2_topic_allowlist_regex" {
   description = "Regex for MM2 source->target topic replication when MSK replication is enabled."
   type        = string
-  default     = "(operational[.].*|client[.].*|pg1[.]transaction)"
+  default     = "cdc[.]tx[.](control|mutations|dlq)[.]v2"
 }
 
 variable "mm2_group_allowlist_regex" {
@@ -66,15 +72,21 @@ variable "db_username" {
 }
 
 variable "client_db_name" {
-  description = "Aurora database name for client projection data."
+  description = "Deprecated compatibility input; transaction protocol uses destination_db_name."
   type        = string
   default     = "clientdb"
 }
 
 variable "operational_db_name" {
-  description = "Aurora database name for operational projection data."
+  description = "Deprecated compatibility input; transaction protocol uses destination_db_name."
   type        = string
   default     = "operationaldb"
+}
+
+variable "destination_db_name" {
+  description = "Single logical Aurora database containing client, operational, and CDC schemas."
+  type        = string
+  default     = "destinationdb"
 }
 
 variable "aurora_instance_class" {

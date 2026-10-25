@@ -147,6 +147,10 @@ Resources:
               - lambda:UpdateFunctionCode
               - lambda:UpdateFunctionConfiguration
               - lambda:DeleteFunction
+              - lambda:AddPermission
+              - lambda:RemovePermission
+              - lambda:PutFunctionConcurrency
+              - lambda:DeleteFunctionConcurrency
               - lambda:CreateEventSourceMapping
               - lambda:UpdateEventSourceMapping
               - lambda:DeleteEventSourceMapping
@@ -155,6 +159,32 @@ Resources:
             Resource:
               - !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${ProjectPrefix}-*"
               - "*"
+
+          - Sid: EventBridgeRetrySweepDeployment
+            Effect: Allow
+            Action:
+              - events:PutRule
+              - events:DeleteRule
+              - events:DescribeRule
+              - events:PutTargets
+              - events:RemoveTargets
+              - events:ListTargetsByRule
+              - events:TagResource
+              - events:UntagResource
+              - events:ListTagsForResource
+            Resource:
+              - !Sub "arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/${ProjectPrefix}-*"
+
+          # The bucket name is deterministic and dedicated to disposable deployment artifacts.
+          # s3:* is intentionally scoped to this one bucket and its object versions so
+          # Terraform can create, inspect, empty, and delete it across provider versions.
+          - Sid: DeploymentArtifactBucket
+            Effect: Allow
+            Action:
+              - s3:*
+            Resource:
+              - !Sub "arn:${AWS::Partition}:s3:::${ProjectPrefix}-${AWS::AccountId}-${AWS::Region}-artifacts"
+              - !Sub "arn:${AWS::Partition}:s3:::${ProjectPrefix}-${AWS::AccountId}-${AWS::Region}-artifacts/*"
 
           - Sid: IamDeploymentForProjectRoles
             Effect: Allow

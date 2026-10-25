@@ -20,6 +20,12 @@ lambda_java/bin/
 local/cloud/lambda-consumer/.gradle/
 local/cloud/lambda-consumer/build/
 local/cloud/lambda-consumer/bin/
+transaction-apply/.gradle/
+transaction-apply/build/
+transaction-projector/.gradle/
+transaction-projector/build/
+transaction-protocol/.gradle/
+transaction-protocol/build/
 
 # Local/editor/OS files
 .DS_Store

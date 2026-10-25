@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../common/ec2-remote.sh
 source "${SCRIPT_DIR}/../common/ec2-remote.sh"
 
-OPERATIONAL_DB_NAME="${OPERATIONAL_DB_NAME:-operationaldb}"
+OPERATIONAL_DB_NAME="${OPERATIONAL_DB_NAME:-destinationdb}"
 OP_AURORA_ENDPOINT="$(terraform_output aurora_operational_endpoint)"
 OP_SECRET_ARN="$(terraform_output aurora_operational_master_secret_arn)"
 require_jq

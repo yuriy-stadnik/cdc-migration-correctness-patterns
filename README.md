@@ -1,54 +1,61 @@
 # Kafka CDC Replication to MSK and Aurora
 
-This project provisions an AWS environment that mirrors the same logical flow as the local split deployment: source CDC and transformations on EC2, replication to MSK, then fan-out writes into separate client and operational Aurora PostgreSQL databases via Lambda.
+This project provisions source CDC and transaction projection on EC2, replication to MSK, and atomic transaction application into one Aurora PostgreSQL database containing `client` and `operational` schemas. See [`docs/transaction-protocol-operations.md`](docs/transaction-protocol-operations.md) for the authoritative path and guarantees.
 
 This is a prototype built with an example inventory/customer/order dataset. Its main purpose is to demonstrate a real-time data flow for migrating a staging persistence layer from on-premises systems toward a service-oriented architecture. The pattern can support phased modernization workflows such as canary releases, blue/green deployments, reporting projections, audit stores, domain-specific read models, and other downstream systems that need live, consistent change streams during migration.
 
+## Documentation
+
+- [`SYSTEM_COMPONENTS_DESCRIPTION.md`](SYSTEM_COMPONENTS_DESCRIPTION.md): concise component and execution-flow overview.
+- [`docs/java-transaction-protocol-and-projector.md`](docs/java-transaction-protocol-and-projector.md): Java protocol records, projector classes, dependencies, and execution sequence.
+- [`docs/transaction-working-example.md`](docs/transaction-working-example.md): executable four-row source transaction traced through the local pipeline.
+- [`docs/transaction-protocol-operations.md`](docs/transaction-protocol-operations.md): local protocol, dependency, recovery, and verification runbook.
+- [`docs/CURRENT_STATUS.md`](docs/CURRENT_STATUS.md): current implementation and verification status.
+- [`local/README.md`](local/README.md): local startup, test, and shutdown commands.
+- [`scripts/ops/README.md`](scripts/ops/README.md): AWS inspection helpers.
+
 The AWS environment uses the public EC2 instance as an on-premises infrastructure emulator. The main flow is:
 
-1. The EC2 instance runs legacy PostgreSQL, Debezium, Kafka, Flink, Kafka UI, and MirrorMaker2 in Docker.
-2. Debezium captures CDC from `inventory.customers`, `inventory.accounts`, and `inventory.orders_flat` into `pg1.inventory.*` topics plus `pg1.transaction`.
-3. Flink transforms CDC events into business topics: `client.customers`, `client.addresses`, `operational.products`, `operational.orders`, `operational.order_items`, and `operational.contact_numbers`.
-4. MirrorMaker2 replicates `client.*`, `operational.*`, and `pg1.transaction` from EC2 Kafka to MSK Serverless using IAM authentication.
-5. A Java Lambda function is triggered from those MSK topics.
-6. Lambda writes to two Aurora targets: client DB (`client.*`) and operational DB (`operational.*`), and stores transaction metadata (`pg1.transaction`) in both.
+1. The EC2 instance runs PostgreSQL, Debezium, Kafka, Flink, Kafka UI, and MirrorMaker2 in Docker.
+2. The simplified local example uses four normalized tables. Each source row owns exactly one destination row with the same primary key.
+3. Debezium routes row changes, source revision-journal rows, and transaction metadata into ordered `cdc.source.capture.v2`.
+4. Flink assembles complete source transactions and emits immutable `cdc.tx.control.v2` and `cdc.tx.mutations.v2` records.
+5. MirrorMaker2 replicates the `cdc.tx.*.v2` protocol topics to MSK Serverless using IAM authentication.
+6. A Java Lambda function is triggered from those MSK topics.
+7. Lambda stages fragments and atomically applies each complete source transaction to one Aurora database containing both business schemas.
 
 ## Architecture
-
-![Full AWS architecture: PostgreSQL CDC, Debezium, Kafka, Flink, MirrorMaker2, MSK Serverless, Lambda, and Aurora PostgreSQL](charts/Flow.png)
 
 The Terraform configuration creates:
 
 - A VPC with two public subnets and two private subnets.
 - An Internet Gateway and NAT Gateway.
 - An MSK Serverless cluster with IAM client authentication.
-- Two Aurora PostgreSQL clusters in private subnets (client and operational).
+- One Aurora PostgreSQL cluster in private subnets with `client`, `operational`, and `cdc` schemas.
 - A public EC2 host that emulates on-prem infrastructure with Docker, PostgreSQL, Debezium, Kafka, Flink, Kafka UI, and MirrorMaker2.
 - A private EC2 network-test host.
 - A Java 17 Lambda function connected to the private subnets.
-- MSK event source mappings that invoke Lambda from `pg1.transaction`, `client.*`, and `operational.*` topics.
+- MSK event source mappings for `cdc.tx.control.v2`, `cdc.tx.mutations.v2`, and `cdc.tx.dlq.v2`.
 - IAM roles and security groups for EC2, MSK, Lambda, and Aurora.
 
-The diagram shows the EC2 host as the source-side infrastructure emulator. It runs the legacy PostgreSQL database, Debezium CDC, local Kafka, Flink SQL transformations, Kafka UI, and MirrorMaker2 containers. AWS keeps the managed target side private: MSK Serverless, Lambda, and both Aurora PostgreSQL clusters run inside the VPC path, with Secrets Manager providing database credentials.
+The EC2 host is the source-side infrastructure emulator. AWS keeps MSK Serverless, Lambda, and the consolidated Aurora PostgreSQL cluster private, with Secrets Manager providing database credentials.
 
 ## Permissions, Topics, and Idempotency
 
-![Access matrix, topic routing, idempotent write strategy, and source metadata support](charts/PermissionTopics.png)
+The transaction protocol uses:
 
-The pipeline is split by topic prefix:
+- `cdc.source.capture.v2` as the ordered source-planning lane.
+- `cdc.tx.control.v2` for immutable manifests and lifecycle control.
+- `cdc.tx.mutations.v2` for immutable numbered mutation payloads.
+- `cdc.tx.dlq.v2` for quarantined source protocol failures.
 
-- `client.*` topics are routed to the client Aurora database.
-- `operational.*` topics are routed to the operational Aurora database.
-- `pg1.transaction` is written to `cdc.transaction_metadata` in both destination databases.
-
-Every derived business topic keeps source metadata from the Debezium event stream: `source_record_type`, `source_ts_ms`, `source_tx_id`, `source_tx_total_order`, and `source_tx_data_collection_order`. Lambda uses topic prefix routing and business keys to upsert or delete destination rows idempotently while preserving the transaction metadata needed for replay, audit, and consistency checks.
+Every mutation carries a canonical source transaction ID, source record sequence, typed object key, operation, idempotency key, source position, and expected/new object versions. PostgreSQL validates the canonical SHA-256 mutation-set digest and exact versions before applying any business row.
 
 ## Repository Layout
 
 ```text
 .
 ├── aurora.tf                 # Aurora PostgreSQL cluster and instance
-├── charts/                   # Architecture, local flow, permissions, and topic diagrams
 ├── ec2.tf                    # EC2 hosts, IAM role, and user data wiring
 ├── iam-terraform-deployer-user.yaml # Optional IAM bootstrap stack for Terraform user setup
 ├── lambda.tf                 # Java Lambda function and MSK event source mapping
@@ -58,6 +65,9 @@ Every derived business topic keeps source metadata from the Debezium event strea
 ├── providers.tf              # Terraform and AWS provider configuration
 ├── security.tf               # Security groups
 ├── scripts/
+│   ├── aws-up.sh               # Start or repair the complete AWS lab
+│   ├── aws-down.sh             # Remove the complete AWS lab; no-op when absent
+│   ├── test-aws-offline.sh      # Unit/integration/config checks without AWS access
 │   ├── connect-kafka-mm2.sh   # macOS/Linux helper for EC2 Instance Connect SSH
 │   ├── connect-kafka-mm2.bat  # Windows helper for EC2 Instance Connect SSH
 │   └── msk/
@@ -89,41 +99,19 @@ Every derived business topic keeps source metadata from the Debezium event strea
 
 This project creates billable AWS resources, including NAT Gateway, EC2, MSK Serverless, Aurora, Lambda, and data transfer.
 
-## Local Integration Stack
-
-The legacy single-stack proof of concept validates the first part of the CDC pipeline before using AWS:
-
-```text
-local legacy PostgreSQL
-  -> Debezium PostgreSQL CDC connector
-  -> local Kafka CDC topic
-  -> Flink SQL projection job
-  -> local target PostgreSQL
-```
-
-Start it from the repository root:
-
-```bash
-docker compose -f examples/legacy-single-stack-poc/docker-compose.yml up -d
-```
-
-The stack is defined in `examples/legacy-single-stack-poc/docker-compose.yml` and reuses local CDC assets from `local/`: one-shot PostgreSQL init, one-shot Debezium connector registration, Flink connector JAR mounting, Kafka UI, and a basic Flink SQL projection into target PostgreSQL. See `local/README.md` for topic checks, source-change commands, and cleanup steps.
-
 ## Local Two-Compose Migration Emulation
-
-![Local Docker Compose deployment: source CDC stack, cloud emulator stack, MirrorMaker2, Lambda emulator, and PostgreSQL targets](charts/LocalFlow.png)
 
 For local development without MSK, Lambda, or Aurora, Terraform can start a split Docker deployment:
 
 ```text
 source compose:
-  PostgreSQL -> Debezium CDC -> Kafka -> Flink -> client.* and operational.* Kafka topics -> MirrorMaker2
+  PostgreSQL -> Debezium -> ordered capture -> Flink projector -> cdc.tx.*.v2 -> MirrorMaker2
 
 cloud replacement compose:
-  Kafka -> local Lambda replacement -> client PostgreSQL + operational PostgreSQL
+  Kafka -> Java apply worker -> one PostgreSQL database (client + operational + cdc schemas)
 ```
 
-The local split flow preserves Debezium transaction metadata by replicating `pg1.transaction`, adding source transaction fields to every derived topic, and storing them on destination tables for consistency checks, replay, and deduplication.
+The local flow reconstructs source boundaries, persists dependencies, and commits all projected effects and their receipt atomically.
 
 Run it with Terraform:
 
@@ -138,7 +126,7 @@ terraform apply \
 Run a delivery test:
 
 ```bash
-./local/scripts/run-local-e2e.sh
+RESET=1 ./local/scripts/run-local-e2e.sh
 ```
 
 Start or stop the split local deployment without running the E2E assertions:
@@ -223,19 +211,19 @@ The helper scripts can also detect or accept your public IP and set `TF_VAR_ssh_
 The main variables are defined in `variables.tf`:
 
 - `aws_region`: AWS region, default `us-east-1`
-- `enable_msk`: controls MSK Serverless + Lambda MSK event mappings, default `false`
+- `enable_msk`: provisions MSK Serverless, default `false`
+- `enable_msk_event_source_mappings`: enables Lambda consumers after MSK topics exist, default `false`
 - `project`: resource name prefix, default `kafka-mm2-msk-lab`
 - `ec2_instance_type`: EC2 host type, default `t3.large`
 - `ec2_root_volume_size`: root EBS volume size for the EC2 source emulator, default `80`
-- `ec2_msk_bootstrap_iam`: optional MSK IAM bootstrap string for MirrorMaker2 on EC2
+- `ec2_msk_bootstrap_iam`: optional external bootstrap override for EC2-only/external-MSK testing; managed MSK is wired automatically
 - `ssh_cidr`: allowed CIDR for SSH and optional Kafka test access, default `0.0.0.0/32`
 - `ec2_instance_connect_user_name`: IAM user allowed to push temporary EC2 Instance Connect SSH keys, default `terraform`
 - `db_name`: legacy variable retained for backward compatibility
 - `db_username`: Aurora master username, default `appuser`
-- `client_db_name`: Aurora client database name, default `clientdb`
-- `operational_db_name`: Aurora operational database name, default `operationaldb`
+- `destination_db_name`: Aurora database containing the `client`, `operational`, and `cdc` schemas, default `destinationdb`
 - `aurora_instance_class`: Aurora instance class, default `db.t3.medium`
-- `mm2_topic_allowlist_regex`: MM2 replication allowlist, default `(operational[.].*|client[.].*|pg1[.]transaction)`
+- `mm2_topic_allowlist_regex`: MM2 replication allowlist, default `cdc[.]tx[.](control|mutations|dlq)[.]v2`
 - `mm2_group_allowlist_regex`: MM2 group sync allowlist, default `__no_groups__`
 - `enable_local_deployment`: starts the local two-compose Docker deployment, default `false`
 - `local_docker_network_name`: shared Docker network for local source and cloud emulator stacks, default `cdc-migration-local`
@@ -271,31 +259,40 @@ Notes:
 
 The helper scripts below set `TF_VAR_ssh_cidr` before Terraform runs. They accept the IP as an argument, or read it from `MY_IP`, `PUBLIC_IP`, or `TF_VAR_ssh_cidr`.
 
-## Build Lambda
+## Build deployment artifacts
 
-Build the Java Lambda fat JAR before running Terraform apply:
+Build the Flink projector and Lambda from the same shared protocol/apply modules before running Terraform apply:
 
 ```bash
-cd lambda_java
-./gradlew clean build
-cd ..
+./scripts/build-deployment-artifacts.sh
 ```
 
-Terraform expects the JAR at:
+Terraform expects both JARs:
 
 ```text
+transaction-projector/build/libs/transaction-projector-all.jar
 lambda_java/build/libs/msk-to-aurora-lambda-1.0.0.jar
 ```
 
 ## Deploy
 
-Initialize and apply Terraform:
+Start or repair the complete AWS environment. The second argument may be an IPv4 address or CIDR; when omitted, the script reads `MY_IP`, `PUBLIC_IP`, or `TF_VAR_ssh_cidr`, then attempts public-IP detection.
 
 ```bash
-terraform init
-terraform plan
-terraform apply
+./scripts/aws-up.sh us-east-1 203.0.113.10/32
 ```
+
+The script initializes Terraform, builds the deployment artifacts, converges missing or partially created infrastructure with mappings disabled, then retries the mapping-enabled apply until the MSK topics exist. Re-running it against an already complete environment is safe and produces a normal no-change Terraform apply.
+
+Optional controls:
+
+```bash
+SKIP_BUILD=1 ./scripts/aws-up.sh us-east-1 203.0.113.10/32
+AUTO_APPROVE=0 ./scripts/aws-up.sh us-east-1 203.0.113.10/32
+MAPPING_APPLY_ATTEMPTS=20 RETRY_DELAY_SECONDS=30 ./scripts/aws-up.sh us-east-1 203.0.113.10/32
+```
+
+`SKIP_BUILD=1` requires both deployable JARs to exist. The lower-level `scripts/msk/msk-up.sh` and `scripts/msk/msk-enable-mappings.sh` remain available when the two phases need to be controlled manually.
 
 Important outputs include:
 
@@ -305,11 +302,9 @@ Important outputs include:
 - `ec2_private_ip`
 - `lambda_net_test_private_ip`
 - `msk_bootstrap_sasl_iam`
-- `aurora_client_endpoint`
-- `aurora_operational_endpoint`
+- `aurora_endpoint`
 - `msk_cluster_arn`
-- `aurora_client_master_secret_arn`
-- `aurora_operational_master_secret_arn`
+- `aurora_master_secret_arn`
 - `aurora_port`
 - `sg_lambda_id`
 - `sg_msk_id`
@@ -386,17 +381,17 @@ The main EC2 host uses `user_data.sh.tpl` to emulate the on-premises side of the
 - Install Docker.
 - Install Docker Compose v2.
 - Download the AWS MSK IAM auth JAR.
-- Download Flink Kafka, JSON, JDBC, and PostgreSQL connector JARs.
-- Create local legacy PostgreSQL init scripts.
+- Download the transaction-projector artifact.
+- Install the same normalized PostgreSQL SQL, Debezium connector, topic specification, MM2 defaults, and E2E transaction SQL used locally.
 - Start local PostgreSQL with logical replication enabled.
 - Register a Debezium PostgreSQL CDC connector.
 - Start local Kafka and Zookeeper.
-- Start Flink JobManager, TaskManager, and a Flink SQL projection job that writes `client.*` and `operational.*` topics with source transaction metadata.
+- Start Flink JobManager, TaskManager, and the Java transaction projector that writes immutable v2 control and mutation topics.
 - Start Kafka UI.
 - Write Kafka client configuration for IAM auth.
 - Write MirrorMaker2 configuration.
 - Create `/opt/lab/docker-compose.yml`.
-- Start MirrorMaker2 to replicate `client.*`, `operational.*`, and `pg1.transaction` to MSK Serverless.
+- Start MirrorMaker2 to replicate the v2 transaction topics to MSK Serverless.
 - Install a `lab-up.service` systemd unit for restarting the Docker stack.
 
 On the EC2 host, useful paths are:
@@ -407,7 +402,6 @@ On the EC2 host, useful paths are:
 /opt/lab/client.properties
 /opt/lab/postgres/init
 /opt/lab/connectors
-/opt/lab/flink/sql/init.sql
 /opt/lab/integration-test-cdc-to-kafka.sh
 /usr/local/bin/lab-up.sh
 /var/log/user-data.log
@@ -422,7 +416,7 @@ Useful EC2 emulator ports are restricted by `ssh_cidr`:
 
 ## EC2 CDC to Kafka Test
 
-The EC2 bootstrap creates `/opt/lab/integration-test-cdc-to-kafka.sh`. The test inserts one row into `inventory.customers` in the source PostgreSQL container and verifies that Debezium publishes the change to Kafka topic `pg1.inventory.customers`.
+The EC2 bootstrap creates `/opt/lab/integration-test-cdc-to-kafka.sh`. The test inserts one row into `inventory.customers` in the source PostgreSQL container and verifies that Debezium publishes the change to `cdc.source.capture.v2`.
 
 After connecting to the EC2 host:
 
@@ -473,26 +467,29 @@ scp -o StrictHostKeyChecking=accept-new \
 
 The Lambda handler:
 
-- Receives Kafka records from MSK for `pg1.transaction`, `client.*`, and `operational.*`.
-- Reads credentials from two RDS-managed Secrets Manager secrets.
-- Connects to two Aurora PostgreSQL databases (client and operational) using JDBC.
-- Upserts projection rows into destination tables with source and transaction metadata fields.
-- Stores transaction metadata from `pg1.transaction` in `cdc.transaction_metadata` on both databases.
+- Receives immutable v2 control, mutation, and diagnostic records from MSK.
+- Reads credentials from the RDS-managed Secrets Manager secret.
+- Connects to one Aurora PostgreSQL database containing the `client`, `operational`, and `cdc` schemas.
+- Durably stages fragments and applies only complete, verified source transactions.
+- Commits business rows, numeric owner versions, and the immutable receipt atomically.
 
 The Lambda environment variables are set by Terraform:
 
-- `CLIENT_DB_HOST`
-- `CLIENT_DB_PORT`
-- `CLIENT_DB_NAME`
-- `CLIENT_DB_USER`
-- `CLIENT_DB_SECRET_ARN`
-- `OPERATIONAL_DB_HOST`
-- `OPERATIONAL_DB_PORT`
-- `OPERATIONAL_DB_NAME`
-- `OPERATIONAL_DB_USER`
-- `OPERATIONAL_DB_SECRET_ARN`
+- `DESTINATION_DB_HOST`
+- `DESTINATION_DB_PORT`
+- `DESTINATION_DB_NAME`
+- `DESTINATION_DB_USER`
+- `DESTINATION_DB_SECRET_ARN`
 
 ## AWS E2E Test
+
+Run the complete offline AWS-oriented suite before using an AWS account:
+
+```bash
+./scripts/test-aws-offline.sh
+```
+
+It runs the protocol, apply, projector, and Lambda tests—including the AWS-shaped MSK batch through the Lambda handler into embedded PostgreSQL—plus lifecycle retry tests, rendered EC2 user-data/Compose validation, and Terraform validation. It does not call AWS.
 
 After MSK is enabled and the EC2 host is configured with the current MSK bootstrap endpoint, run the full AWS path validation with:
 
@@ -500,31 +497,32 @@ After MSK is enabled and the EC2 host is configured with the current MSK bootstr
 ./scripts/run-aws-e2e-test.sh us-east-1 ~/.ssh/temp_ec2_key
 ```
 
-The script inserts a generated test customer/account/order set into the source PostgreSQL container on EC2, verifies the source Kafka topics, verifies mirrored MSK topics, then waits for Lambda to write the expected rows and CDC metadata into both Aurora databases.
+The AWS E2E script uses the same four-row insert and two-row update SQL as the local E2E test. It verifies transaction boundaries across both destination schemas, four- and two-mutation receipts, deterministic idempotency keys, immutable producer claims, version-two producer lineage, and transaction-DAG edges. A live isolated AWS rehearsal completed successfully on 2026-10-24.
 
 Optional environment overrides:
 
 ```bash
 AURORA_WAIT_SECONDS=300 \
 CID=778802093 \
-AID=878802093 \
 OID=978802093 \
 EMAIL=aws-e2e-778802093@example.com \
 ./scripts/run-aws-e2e-test.sh us-east-1 ~/.ssh/temp_ec2_key
 ```
 
-## Manual Lambda Test Helper
-
-`tmp/lambda_test.sh` creates a sample Kafka event payload and invokes the Lambda function through AWS CLI.
-
-Before using it, review the script and make sure the function name and AWS region match your deployment. The current file also contains a stray `Key Highlights` line that should be removed or commented before executing it.
-
 ## Destroy
 
-To remove the project resources:
+Remove every resource in the current Terraform state:
 
 ```bash
-terraform destroy
+./scripts/aws-down.sh us-east-1
 ```
 
-Because this project creates billable infrastructure, destroy the environment when it is no longer needed.
+The script is safe to rerun: it exits successfully when no Terraform-managed environment was started and retries a partially completed destroy. If AWS leaves a detached ENI after deleting its parent service, the script stops before another long Terraform retry and prints the blocking ENI. To let it delete only a detached, available, non-requester-managed ENI whose subnet and security groups remain in this project's Terraform state, rerun with `CLEANUP_ORPHAN_ENIS=1`. ENIs that do not meet every safety check are never deleted automatically.
+
+```bash
+CLEANUP_ORPHAN_ENIS=1 ./scripts/aws-down.sh us-east-1
+```
+
+If deployment JARs are missing but state exists, the script rebuilds them because the Terraform configuration must evaluate their hashes before destroying resources. The versioned artifact bucket uses `force_destroy`, so teardown also deletes its retained object versions.
+
+Set `AUTO_APPROVE=0` to retain Terraform's interactive confirmation. Because this project creates billable infrastructure, destroy the environment when it is no longer needed.

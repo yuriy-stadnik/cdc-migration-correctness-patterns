@@ -13,3 +13,5 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "local-lambda-consumer"
+includeBuild('../../../transaction-protocol')
+includeBuild('../../../transaction-apply')

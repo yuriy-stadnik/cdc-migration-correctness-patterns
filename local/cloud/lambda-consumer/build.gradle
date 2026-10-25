@@ -1,6 +1,5 @@
 plugins {
     id 'java'
-    id 'com.github.johnrengelman.shadow' version '8.1.1'
 }
 
 group = 'com.example.local'
@@ -13,6 +12,8 @@ java {
 }
 
 dependencies {
+    implementation 'com.example.cdc:transaction-protocol:1.0.0'
+    implementation 'com.example.cdc:transaction-apply:1.0.0'
     implementation 'org.apache.kafka:kafka-clients:3.7.2'
     implementation 'org.postgresql:postgresql:42.7.4'
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.17.2'
@@ -30,9 +31,17 @@ tasks.jar {
     }
 }
 
-tasks.shadowJar {
+tasks.register('shadowJar', Jar) {
     archiveFileName.set('local-lambda-consumer-all.jar')
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    manifest { attributes 'Main-Class': 'com.example.local.LocalLambdaConsumer' }
+    from sourceSets.main.output
+    dependsOn configurations.runtimeClasspath
+    from { configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) } }
+    exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA'
 }
+
+tasks.build { dependsOn tasks.shadowJar }
 
 tasks.test {
     useJUnitPlatform()

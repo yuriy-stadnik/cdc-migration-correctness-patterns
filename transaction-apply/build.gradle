@@ -1,0 +1,21 @@
+plugins {
+    id 'java-library'
+}
+group = 'com.example.cdc'
+version = '1.0.0'
+java { toolchain { languageVersion = JavaLanguageVersion.of(17) } }
+repositories { mavenCentral() }
+dependencies {
+    api 'com.example.cdc:transaction-protocol:1.0.0'
+    implementation 'org.postgresql:postgresql:42.7.4'
+    testImplementation platform('org.junit:junit-bom:5.10.3')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testImplementation 'io.zonky.test:embedded-postgres:2.1.0'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+sourceSets.main.resources.srcDir('../db')
+tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8' }
+tasks.test {
+    useJUnitPlatform()
+    systemProperty 'test.runtime.classpath', sourceSets.test.runtimeClasspath.asPath
+}

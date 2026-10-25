@@ -13,6 +13,18 @@ variable "local_docker_network_name" {
 locals {
   local_cloud_compose_file  = "${path.module}/local/cloud/docker-compose.yml"
   local_source_compose_file = "${path.module}/local/source/docker-compose.yml"
+  protocol_source_hash = sha256(join("", [
+    for file in sort(fileset("${path.module}/transaction-protocol", "src/**/*.java")) :
+    filesha256("${path.module}/transaction-protocol/${file}")
+  ]))
+  apply_source_hash = sha256(join("", [
+    for file in sort(fileset("${path.module}/transaction-apply", "src/**/*.java")) :
+    filesha256("${path.module}/transaction-apply/${file}")
+  ]))
+  projector_source_hash = sha256(join("", [
+    for file in sort(fileset("${path.module}/transaction-projector", "src/**/*.java")) :
+    filesha256("${path.module}/transaction-projector/${file}")
+  ]))
 }
 
 resource "terraform_data" "local_docker_network" {
@@ -36,8 +48,9 @@ resource "terraform_data" "local_cloud_deployment" {
     filesha256("${path.module}/local/cloud/lambda-consumer/build.gradle"),
     filesha256("${path.module}/local/cloud/lambda-consumer/settings.gradle"),
     filesha256("${path.module}/local/cloud/lambda-consumer/src/main/java/com/example/local/LocalLambdaConsumer.java"),
-    filesha256("${path.module}/local/cloud/postgres/client-init/01-schema.sql"),
-    filesha256("${path.module}/local/cloud/postgres/operational-init/01-schema.sql")
+    local.apply_source_hash,
+    local.protocol_source_hash,
+    filesha256("${path.module}/db/migration/V001__transaction_protocol.sql")
   ]
 
   depends_on = [terraform_data.local_docker_network]
@@ -53,10 +66,16 @@ resource "terraform_data" "local_source_deployment" {
   triggers_replace = [
     filesha256(local.local_source_compose_file),
     filesha256("${path.module}/local/source/mm2.properties"),
-    filesha256("${path.module}/local/source/flink/sql/init.sql"),
-    filesha256("${path.module}/local/source/connectors/legacy-postgres-source-config.json"),
+    filesha256("${path.module}/transaction-projector/Dockerfile"),
+    filesha256("${path.module}/transaction-projector/build.gradle"),
+    local.projector_source_hash,
+    local.protocol_source_hash,
+    filesha256("${path.module}/local/source/connectors/source-version-v2-config.json"),
+    filesha256("${path.module}/config/transaction-v2-topics.txt"),
+    filesha256("${path.module}/config/mm2-common.properties"),
     filesha256("${path.module}/local/postgres/init/01-role-and-grants.sql"),
-    filesha256("${path.module}/local/postgres/init/02-inventory.sql")
+    filesha256("${path.module}/local/postgres/init/02-inventory.sql"),
+    filesha256("${path.module}/local/postgres/init/03-source-version-v2.sql")
   ]
 
   depends_on = [terraform_data.local_cloud_deployment]
