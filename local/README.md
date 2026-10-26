@@ -4,15 +4,35 @@ The local environment mirrors the production v2 data path with two Compose proje
 
 ```text
 normalized PostgreSQL source
-  -> Debezium ordered capture
-  -> transaction projector
+  -> Debezium / Kafka Connect
+  -> source Kafka: cdc.source.capture.v2
+  -> Flink transaction projector
+  -> source Kafka: cdc.tx.mutations.v2 + cdc.tx.control.v2 + cdc.tx.dlq.v2
   -> MirrorMaker 2
-  -> cloud Kafka emulator
+  -> cloud Kafka emulator: same cdc.tx.* topics
   -> Java apply worker
   -> PostgreSQL destination (client + operational + cdc schemas)
 ```
 
 The source tables are `inventory.customers`, `products`, `orders`, and `order_items`. They split into `client.customers` and the three `operational.*` tables while one destination transaction preserves the source commit boundary. The source has no projection tables, contribution/conflict arbitration, catalog-deletion API, snapshot reconciliation, or global writer lock.
+
+## Flink transaction projector
+
+Debezium has `provide.transaction.metadata=true`. It emits transaction `BEGIN`/`END` metadata on its transaction topic and row events on its table topics. The connector's `RegexRouter` combines those records into the single-partition source Kafka topic `cdc.source.capture.v2`. Changes from `source_cdc.transaction_context` and `source_cdc.revision_journal` are application-level evidence; they do not generate the Debezium `BEGIN`/`END` records.
+
+The Flink job consumes `cdc.source.capture.v2` from `source-kafka:29092` and:
+
+1. Buffers immutable `BEGIN`, row-change, revision-evidence, and `END` records in Flink checkpoint state until the source transaction can be assembled.
+2. Verifies source versions and reduces multiple changes of the same row to one net transition.
+3. Creates `WRITE_PREDECESSOR` dependencies for row-version ordering and `EXISTS` dependencies for foreign-key parents.
+4. Selects the destination table in each mutation:
+   - `inventory.customers` -> `client.customers`
+   - `inventory.products` -> `operational.products`
+   - `inventory.orders` -> `operational.orders`
+   - `inventory.order_items` -> `operational.order_items`
+5. Publishes signed mutations to `cdc.tx.mutations.v2`, one transaction manifest to `cdc.tx.control.v2`, or rejected evidence to `cdc.tx.dlq.v2` on the source Kafka broker.
+
+Flink does not connect to destination PostgreSQL. MirrorMaker 2 copies the three `cdc.tx.*.v2` topics to `cloud-kafka:39092`; the Java apply worker consumes them, stages protocol state in the destination `cdc.v2_*` tables, and atomically applies business rows to the `client` and `operational` schemas.
 
 ## Start and verify
 

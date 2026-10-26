@@ -68,6 +68,7 @@ Every mutation carries a canonical source transaction ID, source record sequence
 │   ├── aws-up.sh               # Start or repair the complete AWS lab
 │   ├── aws-down.sh             # Remove the complete AWS lab; no-op when absent
 │   ├── test-aws-offline.sh      # Unit/integration/config checks without AWS access
+│   ├── generate-project-prompt.sh # Build a curated, secret-scanned LLM analysis bundle
 │   ├── connect-kafka-mm2.sh   # macOS/Linux helper for EC2 Instance Connect SSH
 │   ├── connect-kafka-mm2.bat  # Windows helper for EC2 Instance Connect SSH
 │   └── msk/
@@ -86,6 +87,20 @@ Every mutation carries a canonical source transaction ID, source record sequence
     ├── gradlew.bat           # Gradle wrapper for Windows
     └── src/main/java/com/example/Handler.java
 ```
+
+## External LLM Analysis Bundle
+
+Generate one Markdown file containing the meaningful tracked source, infrastructure,
+automation, tests, and documentation:
+
+```bash
+./scripts/generate-project-prompt.sh
+```
+
+The default output is the ignored `PROJECT_PROMPT_BUNDLE.md`. The generator marks every
+file boundary, skips sensitive filenames, binaries, generated artifacts, and Gradle wrapper
+boilerplate, and runs `gitleaks` when it is available. Use `--help` to select another output,
+include non-ignored untracked files, or change the per-file size limit.
 
 ## Prerequisites
 
